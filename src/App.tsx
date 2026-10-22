@@ -4,17 +4,22 @@ import { PDFDocument } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
 import { ArrowDownToLine, ArrowLeft, ArrowRight, Check, ChevronDown, FilePlus2, FileText, FolderOpen, Info, Layers, LoaderCircle, LockKeyhole, MousePointer2, RotateCcw, RotateCw, ShieldCheck, Type, Upload, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { PdfPage, Thumbnail } from './components/PdfPage'
+import { CalculationPanel } from './components/CalculationPanel'
+import { calculateTotal, formatAmount, recalculate, sampleCalculation, type CalculationRule } from './pdf/calculation'
 import { editRestriction, loadPage, MAX_FILE_SIZE, openPdf, readPdf } from './pdf/reader'
 import { fitText, loadJapaneseFont, makeSample, writePdf } from './pdf/output'
 import type { DocumentSession, Edits, PageModel, Replacement, TextRegion } from './pdf/types'
 import { getLicenseUrl, portableAssets } from './pdf/portable'
 
-type History = { past: Edits[]; present: Edits; future: Edits[] }
-type Action = { type: 'set'; edits: Edits } | { type: 'undo' | 'redo' | 'clear' }
-const emptyHistory: History = { past: [], present: {}, future: [] }
+type Snapshot = { edits: Edits; calculation: CalculationRule | null }
+type History = { past: Snapshot[]; present: Snapshot; future: Snapshot[] }
+type Action = { type: 'set'; edits: Edits; calculation?: CalculationRule | null } | { type: 'clear'; calculation?: CalculationRule | null } | { type: 'undo' | 'redo' }
+const emptyHistory: History = { past: [], present: { edits: {}, calculation: null }, future: [] }
 function historyReducer(state: History, action: Action): History {
-  if (action.type === 'clear') return emptyHistory
-  if (action.type === 'set') return { past: [...state.past.slice(-39), state.present], present: action.edits, future: [] }
+  if (action.type === 'clear') return { past: [], present: { edits: {}, calculation: action.calculation ?? null }, future: [] }
+  if (action.type === 'set') return { past: [...state.past.slice(-39), state.present], present: {
+    edits: action.edits, calculation: action.calculation === undefined ? state.present.calculation : action.calculation,
+  }, future: [] }
   if (action.type === 'undo' && state.past.length) return { past: state.past.slice(0,-1), present: state.past.at(-1)!, future: [state.present, ...state.future] }
   if (action.type === 'redo' && state.future.length) return { past: [...state.past, state.present], present: state.future[0], future: state.future.slice(1) }
   return state
@@ -26,7 +31,7 @@ const formatSize = (size: number) => size >= 1024*1024 ? `${(size/1024/1024).toF
 export default function App() {
   const [session, setSession] = useState<DocumentSession | null>(null)
   const [history, dispatch] = useReducer(historyReducer, emptyHistory)
-  const edits = history.present
+  const { edits, calculation } = history.present
   const [pageIndex, setPageIndex] = useState(0)
   const [model, setModel] = useState<PageModel | null>(null)
   const [preview, setPreview] = useState<{ pdf: PDFDocumentProxy; bytes: Uint8Array; edits: Edits } | null>(null)
@@ -50,7 +55,9 @@ export default function App() {
   const saved = selected ? edits[selected.id] : undefined
   const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? '#202733') || draft.align !== (saved?.align ?? 'left'))
   const editCount = Object.keys(edits).length
-  const restriction = selected && model ? editRestriction(selected, model) : undefined
+  const calculatedTarget = calculation?.target.id === selected?.id && !!calculation
+  const restriction = selected && model ? editRestriction(selected, model) || (calculatedTarget
+    ? 'この合計欄は自動計算で更新します。明細金額を変更してください。' : undefined) : undefined
   const reportError = useCallback((message: string) => setError(message), [])
 
   useEffect(() => {
@@ -109,10 +116,10 @@ export default function App() {
     setLoading(true); setError(''); setNotice('')
     try {
       const next = await openPdf(bytes,name)
-      await loadPage(next,0).catch(async e => { await next.pdf.loadingTask.destroy(); throw e })
+      const firstPage = await loadPage(next,0).catch(async e => { await next.pdf.loadingTask.destroy(); throw e })
       if (version !== loadVersion.current) { await next.pdf.loadingTask.destroy(); return }
       setPreview(null); setSelected(null); setModel(null)
-      setSession(next); setPageIndex(0); dispatch({ type:'clear' }); setAllowCover(false); setZoom(1)
+      setSession(next); setPageIndex(0); dispatch({ type:'clear', calculation: next.sampleEstimate ? sampleCalculation(firstPage) : null }); setAllowCover(false); setZoom(1)
     } catch (e) { if (version === loadVersion.current) setError(messageOf(e)) }
     finally { if (version === loadVersion.current) setLoading(false) }
   }
@@ -133,14 +140,47 @@ export default function App() {
     if (!draft || !selected || !session || !model || restriction || !allowCover || busy) return
     setValidating(true); setError(''); setNotice('')
     try {
-      const doc = await PDFDocument.create(); doc.registerFontkit(fontkit)
-      const font = await doc.embedFont(await loadJapaneseFont(), { subset: true })
       const edit: Replacement = { ...draft, region:selected }
+      const { next, font } = await validateEdits({ ...edits, [selected.id]: edit }, calculation)
       const fitted = fitText(font,edit)
       setActualSize(fitted.size)
-      dispatch({ type:'set', edits:{ ...edits, [selected.id]:edit } })
-      setNotice('変更を反映しました。保存前にプレビューをご確認ください。')
+      dispatch({ type:'set', edits: next })
+      setNotice(calculation && calculation.sources.some(source => source.id === selected.id)
+        ? `明細と合計を更新しました。合計 ${formatAmount(calculateTotal(calculation, next).total)}円（消費税${calculation.taxPercent}%）。`
+        : '変更を反映しました。保存前にプレビューをご確認ください。')
     } catch(e) { setError(messageOf(e)) }
+    finally { setValidating(false) }
+  }
+  async function validateEdits(proposed: Edits, rule: CalculationRule | null) {
+    const doc = await PDFDocument.create(); doc.registerFontkit(fontkit)
+    const font = await doc.embedFont(await loadJapaneseFont(), { subset: true })
+    for (const edit of Object.values(proposed)) fitText(font, edit)
+    const next = rule ? recalculate(proposed, rule) : proposed
+    if (rule) fitText(font, next[rule.target.id])
+    return { next, font }
+  }
+  async function configureCalculation(rule: CalculationRule) {
+    if (!model || busy || !canLeaveDraft()) return
+    setValidating(true); setError(''); setNotice('')
+    try {
+      if ([...rule.sources, rule.target].some(region => !model.regions.includes(region) || editRestriction(region, model)))
+        throw new Error('自動計算には、同じページの編集できる金額欄を選択してください。')
+      const { next } = await validateEdits(edits, rule)
+      dispatch({ type:'set', edits: next, calculation: rule })
+      setSelected(null); setAllowCover(true)
+      setNotice('自動計算を設定しました。明細金額を変更すると合計も更新します。')
+    } catch (error) { setError(messageOf(error)) }
+    finally { setValidating(false) }
+  }
+  async function resetSelectedEdit() {
+    if (!selected || busy || calculatedTarget) return
+    setValidating(true); setError('')
+    try {
+      const proposed = { ...edits }; delete proposed[selected.id]
+      const { next } = await validateEdits(proposed, calculation)
+      dispatch({ type:'set', edits: next })
+      setNotice(calculation ? '変更を取り消し、合計も更新しました。' : '変更を取り消しました。')
+    } catch (error) { setError(messageOf(error)) }
     finally { setValidating(false) }
   }
   function download() {
@@ -209,7 +249,7 @@ export default function App() {
             <button type="button" className="sample-button" disabled={busy} onClick={()=>void openSample()}><FilePlus2 size={16}/>サンプルPDFを試す<ArrowRight size={15}/></button>
             <div className="welcome-benefits"><span><LockKeyhole size={15}/>アップロード不要</span><span><Check size={15}/>日本語に対応</span><span><Check size={15}/>無料・アカウント不要</span></div>
           </div> : <>
-            {model && preview ? <><div className="document-hint"><MousePointer2 size={14}/>PDF上の文字をクリックして選択<span>{model.regions.length}件の文字領域</span></div><PdfPage pdf={preview.pdf} pageIndex={pageIndex} model={model} zoom={zoom} selected={selected?.id} edits={edits} disabled={busy} onSelect={chooseRegion} onError={reportError}/><div className="page-navigation"><button className="icon-button" aria-label="前のページ" onClick={()=>changePage(pageIndex-1)} disabled={pageIndex===0 || busy}><ArrowLeft size={16}/></button><span>{pageIndex+1} / {session.pdf.numPages}</span><button className="icon-button" aria-label="次のページ" onClick={()=>changePage(pageIndex+1)} disabled={pageIndex===session.pdf.numPages-1 || busy}><ArrowRight size={16}/></button></div></> : <div className="workspace-loading"><LoaderCircle className="spin" size={24}/><p>PDFを読み込んでいます…</p></div>}
+            {model && preview ? <><div className="document-hint"><MousePointer2 size={14}/>PDF上の文字をクリックして選択<span>{model.regions.length}件の文字領域</span>{calculation && <span className="calculation-active">合計を自動計算・税率{calculation.taxPercent}%</span>}</div><PdfPage pdf={preview.pdf} pageIndex={pageIndex} model={model} zoom={zoom} selected={selected?.id} edits={edits} disabled={busy} onSelect={chooseRegion} onError={reportError}/><div className="page-navigation"><button className="icon-button" aria-label="前のページ" onClick={()=>changePage(pageIndex-1)} disabled={pageIndex===0 || busy}><ArrowLeft size={16}/></button><span>{pageIndex+1} / {session.pdf.numPages}</span><button className="icon-button" aria-label="次のページ" onClick={()=>changePage(pageIndex+1)} disabled={pageIndex===session.pdf.numPages-1 || busy}><ArrowRight size={16}/></button></div></> : <div className="workspace-loading"><LoaderCircle className="spin" size={24}/><p>PDFを読み込んでいます…</p></div>}
             {model?.regions.length===0 && <div className="inline-note">文字情報がありません。スキャン画像のPDFには、Phase 1では文字編集できません。</div>}
             {model && model.regions.length>3000 && <div className="inline-note">文字領域が多いため、先頭3,000件を選択対象にしています。</div>}
           </>}
@@ -217,6 +257,10 @@ export default function App() {
       </section>
 
       <aside className="properties-panel"><div className="panel-title"><Type size={17}/><h2>テキスト編集</h2>{selected && <button className="icon-button" aria-label="選択を解除" onClick={()=>{if(canLeaveDraft())setSelected(null)}}><X size={15}/></button>}</div>
+        {model && <CalculationPanel model={model} rule={calculation} edits={edits} busy={busy}
+          onApply={rule => void configureCalculation(rule)}
+          onDisable={() => { if (!busy && canLeaveDraft()) { dispatch({ type:'set', edits, calculation:null }); setSelected(null); setNotice('自動計算を解除しました。現在の合計値は残ります。') } }}
+          onShowPage={changePage}/>}
         {selected && draft ? <div className="properties-scroll"><div className="selection-tag"><span className="selection-dot"/>テキストを選択中<span>{pageIndex+1}ページ</span></div>
           <label className="field-label">元のテキスト</label><div className="original-text">{selected.text}</div>
           {restriction && <div className="restriction-note" role="status"><Info size={16}/><span>{restriction}</span></div>}
@@ -228,7 +272,7 @@ export default function App() {
             <div className="autofit-note"><Check size={15}/><div>元の領域に合わせて自動調整<small>幅・高さに収まるよう文字を縮小します。{actualSize && ` 適用サイズ ${actualSize.toFixed(1)} pt`}</small></div></div>
             <label className="cover-consent"><input type="checkbox" checked={allowCover} disabled={!!restriction || busy} onChange={e=>setAllowCover(e.target.checked)}/><span>元の文字を白く覆う方式を理解しました。背景はプレビューで確認します。</span></label>
             <button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={!!restriction || busy || !allowCover || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button>
-            {saved && <button type="button" className="text-button reset-button" disabled={busy} onClick={()=>{const next={...edits};delete next[selected.id];dispatch({type:'set',edits:next});setError('')}}><RotateCcw size={14}/>この変更を取り消す</button>}
+            {saved && !calculatedTarget && <button type="button" className="text-button reset-button" disabled={busy} onClick={()=>void resetSelectedEdit()}><RotateCcw size={14}/>この変更を取り消す</button>}
           </div>
         </div> : <div className="empty-properties"><div className="cursor-icon"><MousePointer2 size={29}/><span>文字</span></div><h3>編集したい文字を選択</h3><p>PDF上の文字や数字をクリックすると、<br/>ここで内容を変更できます。</p><div className="step-list"><div><span>1</span>PDFファイルを開く</div><div><span>2</span>文字を選んで変更する</div><div><span>3</span>PDFを保存する</div></div></div>}
         <div className="limitation-note"><Info size={16}/><div><strong>編集できる範囲について</strong><p>Phase 1は白背景の横書き文字に対応。元の文字はPDF内に残ります。機密情報の削除には使えません。</p><button type="button" onClick={()=>setShowHelp(true)}>詳しい制限を見る<ArrowRight size={12}/></button></div></div>
@@ -237,6 +281,6 @@ export default function App() {
 
     <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''}` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.1.0</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
-    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックして内容を変更します。「変更を適用」で実際のPDFプレビューを確認し、「PDFを保存」で別名ダウンロードできます。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元のフォントの字形や太さは維持できません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。保存後の再読み込みでは文字が重複し、再編集できない領域があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
+    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックして内容を変更します。「変更を適用」で実際のPDFプレビューを確認し、「PDFを保存」で別名ダウンロードできます。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元のフォントの字形や太さは維持できません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。保存後の再読み込みでは文字が重複し、再編集できない領域があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定はこのタブ内で保持し、PDFには計算結果を保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
   </div>
 }

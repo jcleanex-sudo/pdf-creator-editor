@@ -35,4 +35,5 @@ export type DocumentSession = {
   pdf: PDFDocumentProxy
   pageCache: Map<number, Promise<PageModel>>
   size: number
+  sampleEstimate: boolean
 }

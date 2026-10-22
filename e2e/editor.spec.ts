@@ -45,7 +45,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
     const b=await textButton(page,text).boundingBox(),paper=await page.locator('.pdf-paper').boundingBox()
     masks.push({x:b!.x-paper!.x,y:b!.y-paper!.y,width:b!.width,height:b!.height})
   }
-  await rememberMask('150,000');await rememberMask('株式会社サンプル 御中')
+  await rememberMask('150,000');await rememberMask('株式会社サンプル 御中');await rememberMask('198,000')
   await page.locator('.page-canvas').evaluate((el)=>{
     const canvas=el as HTMLCanvasElement
     ;(window as unknown as {originalPixels:ImageData}).originalPixels=canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height)
@@ -53,11 +53,11 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await page.getByLabel('変更後のテキスト').fill('250,000')
   await page.getByRole('checkbox').check()
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
-  await ready(page,1);await saveReady(page)
+  await ready(page,2);await saveReady(page)
   await textButton(page,'株式会社サンプル 御中').click()
   await page.getByLabel('変更後のテキスト').fill('株式会社テスト 御中')
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
-  await ready(page,2);await saveReady(page)
+  await ready(page,3);await saveReady(page)
   await page.locator('.paper-loading').waitFor({state:'hidden'})
   const outsideDifferences=await page.locator('.page-canvas').evaluate((element,rects)=>{
     const canvas=element as HTMLCanvasElement,after=canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height)
@@ -74,9 +74,9 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   expect(outsideDifferences).toBe(0)
 
   await page.getByRole('button',{name:'元に戻す',exact:true}).click()
-  await ready(page,1);await saveReady(page)
-  await page.getByRole('button',{name:'やり直す',exact:true}).click()
   await ready(page,2);await saveReady(page)
+  await page.getByRole('button',{name:'やり直す',exact:true}).click()
+  await ready(page,3);await saveReady(page)
   await page.getByRole('button',{name:'次のページ',exact:true}).click()
   await expect(textButton(page,'ご利用について')).toBeVisible()
   await page.getByRole('button',{name:'前のページ',exact:true}).click()
@@ -94,6 +94,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await reopened.locator('input[type=file]').setInputFiles(outputPath)
   await expect(textButton(reopened,'250,000')).toBeAttached()
   await expect(textButton(reopened,'株式会社テスト 御中')).toBeAttached()
+  await expect(textButton(reopened,'308,000')).toBeAttached()
   // The old text remains: verify our no-redaction warning describes actual behavior.
   await expect(textButton(reopened,'150,000')).toBeAttached()
   expect(external).toEqual([])

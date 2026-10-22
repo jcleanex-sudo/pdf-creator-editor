@@ -1,4 +1,5 @@
-import { PDFDocument, rgb, type PDFFont } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFString, rgb, type PDFFont } from 'pdf-lib'
+import { SAMPLE_TEMPLATE } from './calculation'
 import fontkit from '@pdf-lib/fontkit'
 import type { Edits, Replacement } from './types'
 import { decodeBase64, portableAssets } from './portable'
@@ -64,6 +65,7 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
 
 export async function makeSample(fontBytes: Uint8Array) {
   const pdf = await PDFDocument.create()
+  pdf.catalog.set(PDFName.of('PDFEditorTemplate'), PDFString.of(SAMPLE_TEMPLATE))
   pdf.registerFontkit(fontkit)
   const font = await pdf.embedFont(fontBytes, { subset: false })
   const page = pdf.addPage([595.28, 841.89])

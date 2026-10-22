@@ -1,6 +1,7 @@
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { PDFDocument, PDFSignature } from 'pdf-lib'
+import { PDFDocument, PDFSignature, PDFName, PDFString } from 'pdf-lib'
+import { SAMPLE_TEMPLATE } from './calculation'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import type { DocumentSession, PageModel, Rect, TextRegion } from './types'
 import { EmbeddedBinaryDataFactory, portableAssets } from './portable'
@@ -25,8 +26,11 @@ export async function openPdf(bytes: Uint8Array, name: string): Promise<Document
   if (!new TextDecoder('latin1').decode(bytes.slice(0, 1024)).includes('%PDF-')) throw new Error('PDFファイルを選択してください。')
   let pageCount: number
   let hasSignature: boolean
+  let sampleEstimate = false
   try {
     const parsed = await PDFDocument.load(bytes)
+    const template = parsed.catalog.get(PDFName.of('PDFEditorTemplate'))
+    sampleEstimate = template instanceof PDFString && template.decodeText() === SAMPLE_TEMPLATE
     pageCount = parsed.getPageCount()
     if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error('Invalid page tree')
     hasSignature = parsed.getForm().getFields().some(field => field instanceof PDFSignature)
@@ -40,7 +44,7 @@ export async function openPdf(bytes: Uint8Array, name: string): Promise<Document
   const task = readPdf(bytes)
   try {
     const pdf = await task.promise
-    return { bytes, pdf, name, size: bytes.length, pageCache: new Map() }
+    return { bytes, pdf, name, size: bytes.length, pageCache: new Map(), sampleEstimate }
   } catch {
     await task.destroy()
     throw new Error('このPDFを表示できません。別のPDFをお試しください。')
