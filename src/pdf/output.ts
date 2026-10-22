@@ -1,19 +1,62 @@
-import { PDFDocument, PDFName, PDFString, rgb, type PDFFont } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFString, StandardFonts, StandardFontEmbedder, concatTransformationMatrix, pushGraphicsState, popGraphicsState, rgb, type PDFFont } from 'pdf-lib'
 import { SAMPLE_TEMPLATE } from './calculation'
 import fontkit from '@pdf-lib/fontkit'
 import type { Edits, Replacement } from './types'
 import { decodeBase64, portableAssets } from './portable'
 
-let fontPromise: Promise<Uint8Array> | undefined
-export function loadJapaneseFont() {
+const fontPromises = new Map<boolean, Promise<Uint8Array>>()
+export function loadJapaneseFont(bold = false) {
   const embedded=portableAssets()
-  if(embedded) return Promise.resolve(decodeBase64(embedded.font))
-  fontPromise ??= fetch(`${import.meta.env.BASE_URL}fonts/NotoSansJP-Regular.ttf`)
+  if(embedded) return Promise.resolve(decodeBase64(bold ? embedded.boldFont : embedded.font))
+  let promise = fontPromises.get(bold)
+  promise ??= fetch(`${import.meta.env.BASE_URL}fonts/NotoSansJP-${bold ? 'Bold' : 'Regular'}.ttf`)
     .then(async response => {
       if (!response.ok) throw new Error('日本語フォントを読み込めませんでした。ページを再読み込みしてください。')
       return new Uint8Array(await response.arrayBuffer())
-    }).catch(error => { fontPromise = undefined; throw error })
-  return fontPromise
+    }).catch(error => { fontPromises.delete(bold); throw error })
+  fontPromises.set(bold, promise)
+  return promise
+}
+
+const charsets = new WeakMap<PDFFont, Set<number>>()
+function charset(font: PDFFont) {
+  let values = charsets.get(font)
+  if (!values) { values = new Set(font.getCharacterSet()); charsets.set(font, values) }
+  return values
+}
+export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, subset = false) {
+  pdf.registerFontkit(fontkit)
+  const fonts = new Map<string, Promise<PDFFont>>()
+  const embed = (key: string, loader: () => Promise<PDFFont>) => {
+    if (!fonts.has(key)) fonts.set(key, loader())
+    return fonts.get(key)!
+  }
+  return async (edit: Replacement) => {
+    const standard = edit.region.appearance?.standardFont
+    if (standard && Object.values(StandardFonts).includes(standard)) {
+      const font = await embed(standard, () => pdf.embedFont(standard))
+      if ([...edit.text].every(character => charset(font).has(character.codePointAt(0)!))) return font
+    }
+    return edit.region.appearance?.bold
+      ? embed('NotoSansJP-Bold', async () => pdf.embedFont(await loadJapaneseFont(true), { subset }))
+      : embed('NotoSansJP-Regular', () => pdf.embedFont(regularBytes, { subset }))
+  }
+}
+
+const latinEncoding = StandardFontEmbedder.for('Helvetica' as Parameters<typeof StandardFontEmbedder.for>[0]).encoding
+export function replacementFontLabel(edit: Replacement) {
+  const standard = edit.region.appearance?.standardFont
+  if (standard && [...edit.text].every(character => latinEncoding.canEncodeUnicodeCodePoint(character.codePointAt(0)!))) return standard
+  return `Noto Sans JP ${edit.region.appearance?.bold ? 'Bold' : 'Regular'}`
+}
+
+export function replacementFontWarning(edit: Replacement) {
+  const label = replacementFontLabel(edit), appearance = edit.region.appearance
+  const fallback = label.startsWith('Noto Sans JP')
+  return [appearance?.warning,
+    appearance?.standardFont && fallback ? '入力した文字を元の欧文書体で表示できないため、日本語書体を使用します。' : undefined,
+    appearance?.italic && fallback ? '元の斜体の形は再現できません。' : undefined,
+  ].filter(Boolean).join(' ')
 }
 
 export function fitText(font: PDFFont, edit: Replacement) {
@@ -22,42 +65,49 @@ export function fitText(font: PDFFont, edit: Replacement) {
   if (/[\r\n\t\u0000-\u001f\u007f]/u.test(text)) throw new Error('改行・タブ・制御文字は使用できません。')
   if (!Number.isFinite(edit.fontSize) || edit.fontSize < 4 || edit.fontSize > 144) throw new Error('文字サイズは4〜144 ptで指定してください。')
   if (!/^#[0-9a-f]{6}$/iu.test(edit.color)) throw new Error('文字色を正しく指定してください。')
-  const charset = new Set(font.getCharacterSet())
-  const unsupported = [...new Set([...text].filter(c => !charset.has(c.codePointAt(0)!)))]
+  const unsupported = [...new Set([...text].filter(c => !charset(font).has(c.codePointAt(0)!)))]
   if (unsupported.length) throw new Error(`同梱フォントで保存できない文字があります：${unsupported.slice(0, 8).join(' ')}`)
-  const width = text ? font.widthOfTextAtSize(text, edit.fontSize) : 0
   // Keep both the width and the glyph ascent/descent inside the original region.
   const ascent = font.heightAtSize(1, { descender: false })
   const fullHeight = font.heightAtSize(1, { descender: true })
   const descent = Math.max(0, fullHeight - ascent)
   const topSpace = region.rect.y + region.rect.height - region.baseline - 0.35
   const bottomSpace = region.baseline - region.rect.y - 0.35
-  const size = Math.min(edit.fontSize, width ? edit.fontSize * region.width / width : edit.fontSize,
+  let size = Math.min(edit.fontSize,
     topSpace / ascent, descent ? bottomSpace / descent : edit.fontSize)
+  const naturalWidth = text ? font.widthOfTextAtSize(text, size) : 0
+  // Preserve the original point size when possible. Modest horizontal fitting
+  // avoids making a same-length numeric replacement noticeably shorter.
+  const scaleX = naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
+  if (naturalWidth * scaleX > region.width) size *= region.width / (naturalWidth * scaleX)
   if (!Number.isFinite(size) || size < 4) throw new Error('元の領域に収まりません。文字を短くするか、別の領域を選んでください。')
-  const fittedWidth = text ? font.widthOfTextAtSize(text, size) : 0
+  const fittedWidth = text ? font.widthOfTextAtSize(text, size) * scaleX : 0
   const offset = edit.align === 'right' ? region.width - fittedWidth : edit.align === 'center' ? (region.width - fittedWidth) / 2 : 0
-  return { size, x: region.x + offset, width: fittedWidth }
+  return { size, x: region.x + offset, width: fittedWidth, scaleX }
 }
 
 export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array): Promise<Uint8Array> {
   const entries = Object.values(edits)
   if (!entries.length) return original.slice()
   const pdf = await PDFDocument.load(original)
-  pdf.registerFontkit(fontkit)
   // Full embedding avoids reproducible missing glyphs in fontkit's Japanese subsetting.
   // The extra file size is intentional until a verified subset pipeline is available.
-  const font = await pdf.embedFont(fontBytes, { subset: false })
+  const resolveFont = createFontResolver(pdf, fontBytes)
   const pages = pdf.getPages()
   // Compute every placement before changing the document: failed edits never produce partial output.
-  const placements = entries.map(edit => ({ edit, fit: fitText(font, edit) }))
-  for (const { edit, fit } of placements) {
+  const placements = await Promise.all(entries.map(async edit => {
+    const font = await resolveFont(edit)
+    return { edit, font, fit: fitText(font, edit) }
+  }))
+  for (const { edit, font, fit } of placements) {
     const page = pages[edit.region.pageIndex]
     if (!page) throw new Error('編集対象のページが見つかりません。')
     page.drawRectangle({ ...edit.region.rect, color: rgb(1, 1, 1), borderWidth: 0 })
     if (edit.text) {
       const parts = edit.color.slice(1).match(/../g)!.map(part => parseInt(part, 16) / 255)
-      page.drawText(edit.text, { x: fit.x, y: edit.region.baseline, size: fit.size, font, color: rgb(parts[0], parts[1], parts[2]) })
+      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, edit.region.baseline))
+      page.drawText(edit.text, { x: 0, y: 0, size: fit.size, font, color: rgb(parts[0], parts[1], parts[2]) })
+      page.pushOperators(popGraphicsState())
     }
   }
   return pdf.save()

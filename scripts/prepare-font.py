@@ -13,8 +13,15 @@ source = urlopen(URL, timeout=60).read()
 if sha256(source).hexdigest() != SOURCE_SHA256:
     raise ValueError("Upstream font changed. Review provenance and license before updating the expected hash.")
 font = TTFont(BytesIO(source), recalcTimestamp=False)
-regular = instantiateVariableFont(font, {"wght": 400}, inplace=False)
-regular.recalcTimestamp = False
-target = ROOT / "public/fonts/NotoSansJP-Regular.ttf"
-regular.save(target)
-print(target.name, "SHA256", sha256(target.read_bytes()).hexdigest())
+for weight, variant in [(400, "Regular"), (700, "Bold")]:
+    instance = instantiateVariableFont(font, {"wght": weight}, inplace=False)
+    instance.recalcTimestamp = False
+    if variant == "Bold":
+        names = {1: "Noto Sans JP", 2: "Bold", 4: "Noto Sans JP Bold",
+                 6: "NotoSansJP-Bold", 16: "Noto Sans JP", 17: "Bold"}
+        for record in instance["name"].names:
+            if record.nameID in names:
+                record.string = names[record.nameID].encode(record.getEncoding())
+    target = ROOT / f"public/fonts/NotoSansJP-{variant}.ttf"
+    instance.save(target)
+    print(target.name, "SHA256", sha256(target.read_bytes()).hexdigest())

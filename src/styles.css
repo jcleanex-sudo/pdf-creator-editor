@@ -21,3 +21,5 @@
 .calculation-summary{font-size:10px;line-height:1.8;font-weight:600}
 .calculation-fields .field-label{margin:2px 0 0}
 .document-hint>.calculation-active{color:#5a8a72}
+
+.font-note .font-warning{color:#927339;line-height:1.7;margin-top:5px}

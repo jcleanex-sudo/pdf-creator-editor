@@ -41,6 +41,13 @@ describe('text placement and validation',()=>{
   it('allows removing displayed text with an empty replacement',()=>{
     expect(fitText(font,{...base,text:''}).width).toBe(0)
   })
+  it('keeps the point size for modest width differences using horizontal fitting',()=>{
+    const natural = font.widthOfTextAtSize(base.text, base.fontSize)
+    const fit = fitText(font, { ...base, region: { ...base.region, width: natural * 0.9 } })
+    expect(fit.size).toBe(base.fontSize)
+    expect(fit.scaleX).toBeCloseTo(0.9)
+    expect(fit.width).toBeCloseTo(natural * 0.9)
+  })
 })
 
 describe('PDF preservation and Japanese export',()=>{

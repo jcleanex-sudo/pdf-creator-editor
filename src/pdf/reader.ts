@@ -2,6 +2,7 @@ import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { PDFDocument, PDFSignature, PDFName, PDFString } from 'pdf-lib'
 import { SAMPLE_TEMPLATE } from './calculation'
+import { fontAppearance, textPaints } from './appearance'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import type { DocumentSession, PageModel, Rect, TextRegion } from './types'
 import { EmbeddedBinaryDataFactory, portableAssets } from './portable'
@@ -17,7 +18,7 @@ export function readPdf(bytes: Uint8Array) {
   const base = `${import.meta.env.BASE_URL}pdfjs/`
   return pdfjs.getDocument({ data: bytes.slice(), cMapUrl: `${base}cmaps/`, cMapPacked: true,
     standardFontDataUrl: `${base}standard_fonts/`, wasmUrl: `${base}wasm/`,
-    isOffscreenCanvasSupported: false,
+    isOffscreenCanvasSupported: false, fontExtraProperties: true,
     ...(embedded ? {useWorkerFetch:false,BinaryDataFactory:EmbeddedBinaryDataFactory} : {}) })
 }
 
@@ -70,23 +71,11 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
   const page = await session.pdf.getPage(pageIndex + 1)
   const viewport = page.getViewport({ scale: 1 })
   const content = await page.getTextContent()
+  const operators = await page.getOperatorList()
+  const operatorNames = Object.fromEntries(Object.entries(pdfjs.OPS).map(([name, value]) => [value, name]))
+  const paints = textPaints(operators.fnArray.map((value, index) => ({ name: operatorNames[value], args: operators.argsArray[index] })))
   const regions: TextRegion[] = []
   const items = content.items.filter((item): item is TextItem => 'str' in item && !!item.str.trim())
-  for (const [index, item] of items.entries()) {
-    const [a,b,c,d,x,y] = item.transform
-    const fontSize = Math.hypot(c,d)
-    const style = content.styles[item.fontName]
-    const ascent = style?.ascent ?? 0.88
-    const descent = style?.descent ?? -0.12
-    const rect = { x: x-0.5, y: y + descent * fontSize - 0.5, width: item.width+1, height: (ascent-descent)*fontSize+1 }
-    const screen = viewportRect(viewport,rect)
-    let unsupportedReason: string | undefined
-    if (page.rotate !== 0 || page.userUnit !== 1 || Math.abs(b) > 0.01 || Math.abs(c) > 0.01 || a <= 0 || d <= 0 || style?.vertical)
-      unsupportedReason = '回転・縦書き・特殊な変形の文字にはまだ対応していません。'
-    else if (fontSize < 4 || item.width <= 1 || screen.x < 0 || screen.y < 0 || screen.x+screen.width > viewport.width || screen.y+screen.height > viewport.height)
-      unsupportedReason = '文字領域が小さすぎるか、ページの外側にあります。'
-    regions.push({ id: `${pageIndex}:${index}`, pageIndex, text: item.str, x, baseline: y, width: item.width, fontSize, rect, screen, unsupportedReason })
-  }
   const pixelScale = Math.min(1.5, Math.sqrt(8_000_000 / (viewport.width*viewport.height)))
   const raster = page.getViewport({ scale: pixelScale })
   const canvas = document.createElement('canvas')
@@ -119,10 +108,34 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
       return annotationDepth > 0 || !textPaint.has(operation)
     },
   }).promise
+  for (const [index, item] of items.entries()) {
+    const [a,b,c,d,x,y] = item.transform
+    const fontSize = Math.hypot(c,d)
+    const style = content.styles[item.fontName]
+    const ascent = style?.ascent ?? 0.88
+    const descent = style?.descent ?? -0.12
+    const rect = { x: x-0.5, y: y + descent * fontSize - 0.5, width: item.width+1, height: (ascent-descent)*fontSize+1 }
+    const screen = viewportRect(viewport,rect)
+    let unsupportedReason: string | undefined
+    if (page.rotate !== 0 || page.userUnit !== 1 || Math.abs(b) > 0.01 || Math.abs(c) > 0.01 || a <= 0 || d <= 0 || style?.vertical)
+      unsupportedReason = '回転・縦書き・特殊な変形の文字にはまだ対応していません。'
+    else if (fontSize < 4 || item.width <= 1 || screen.x < 0 || screen.y < 0 || screen.x+screen.width > viewport.width || screen.y+screen.height > viewport.height)
+      unsupportedReason = '文字領域が小さすぎるか、ページの外側にあります。'
+    const font = page.commonObjs.has(item.fontName) ? page.commonObjs.get(item.fontName) : undefined
+    const appearance = fontAppearance(String(font?.name ?? ''), !!(font?.bold || font?.black), !!font?.italic)
+    const paint = paints.next(item.str, item.fontName)
+    appearance.color = paint.color
+    if (paint.warning) appearance.warning = [appearance.warning, paint.warning].filter(Boolean).join(' ')
+    unsupportedReason ??= paint.unsafe
+    regions.push({ id: `${pageIndex}:${index}`, pageIndex, text: item.str, x, baseline: y, width: item.width, fontSize, rect, screen, unsupportedReason, appearance })
+  }
   if (unreliableBackground) for (const region of regions)
     region.unsupportedReason ??= '文字の切り抜きや透明マスクを使ったPDFは、背景を保護するため編集できません。'
   const pixels = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height)
   canvas.width = canvas.height = 0
+  // Extra metadata is needed for font identification, not for retaining a
+  // second copy of every font program after the browser has loaded it.
+  for (const name of Object.keys(content.styles)) if (page.commonObjs.has(name)) page.commonObjs.get(name)?.clearData?.()
   return { width: viewport.width, height: viewport.height, regions, pixels, pixelScale }
 }
 

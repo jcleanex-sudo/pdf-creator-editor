@@ -1,5 +1,6 @@
 import type { Edits, PageModel, Replacement, TextRegion } from './types'
 import { editRestriction } from './safety'
+import { originalColor } from './appearance'
 
 export const SAMPLE_TEMPLATE = 'estimate-v1'
 export type CalculationRule = { sources: TextRegion[]; target: TextRegion; taxPercent: number }
@@ -37,7 +38,7 @@ export function calculateTotal(rule: CalculationRule, edits: Edits) {
 export function recalculate(edits: Edits, rule: CalculationRule): Edits {
   const { total } = calculateTotal(rule, edits)
   const previous: Replacement = edits[rule.target.id] ?? {
-    region: rule.target, text: rule.target.text, fontSize: rule.target.fontSize, color: '#202733', align: 'right',
+    region: rule.target, text: rule.target.text, fontSize: rule.target.fontSize, color: originalColor(rule.target), align: 'right',
   }
   return { ...edits, [rule.target.id]: { ...previous, text: formatAmount(total) } }
 }

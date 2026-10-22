@@ -19,7 +19,9 @@
 
 Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
 
-同梱の TrueType フォントは公式可変フォントから FontTools 4.61.1 で wght=400 の静的インスタンスを生成したもの。Reserved Font Name 'Source' は使用していない。OFL本文は `public/fonts/OFL.txt` に同梱。生成元のSHA-256は `scripts/prepare-font.py` で固定し、検証を省略しない。通常の `npm ci` / ビルドでフォント生成やネットワーク取得は不要。
+同梱の TrueType フォントは公式可変フォントから FontTools 4.61.1 で wght=400（Regular）と700（Bold）の静的インスタンスを生成したもの。Boldの名称情報は実際の太さに合わせて設定する。Reserved Font Name 'Source' は使用していない。OFL本文は `public/fonts/OFL.txt` に同梱。生成元のSHA-256は `scripts/prepare-font.py` で固定し、検証を省略しない。通常の `npm ci` / ビルドでフォント生成やネットワーク取得は不要。
+
+元PDFのフォント名に基づいて標準のHelvetica／Times／Courier系列を選べる場合は、pdf-libが提供する標準フォントと文字幅情報を利用する。未知の埋め込みフォントプログラムを抽出して再配布する処理は追加しない。入力された文字が標準フォントにない場合は、上記の同梱日本語フォントへ切り替える。
 
 Phase 1はフォント全体を埋め込む。fontkitの日本語サブセット生成では文字の欠落が再現したため使用しない。保存時にはファイルサイズが数MB増加する。出力PDFそのものにOFLを適用する義務はない（OFL本文参照）。
 

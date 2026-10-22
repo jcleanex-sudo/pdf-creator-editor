@@ -1,4 +1,5 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import type { OriginalAppearance } from './appearance'
 
 export type Rect = { x: number; y: number; width: number; height: number }
 export type TextRegion = {
@@ -12,6 +13,7 @@ export type TextRegion = {
   rect: Rect
   screen: Rect
   unsupportedReason?: string
+  appearance?: OriginalAppearance
 }
 export type Replacement = {
   region: TextRegion

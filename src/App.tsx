@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { PDFDocument } from 'pdf-lib'
-import fontkit from '@pdf-lib/fontkit'
 import { ArrowDownToLine, ArrowLeft, ArrowRight, Check, ChevronDown, FilePlus2, FileText, FolderOpen, Info, Layers, LoaderCircle, LockKeyhole, MousePointer2, RotateCcw, RotateCw, ShieldCheck, Type, Upload, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { PdfPage, Thumbnail } from './components/PdfPage'
 import { CalculationPanel } from './components/CalculationPanel'
 import { calculateTotal, formatAmount, recalculate, sampleCalculation, type CalculationRule } from './pdf/calculation'
 import { editRestriction, loadPage, MAX_FILE_SIZE, openPdf, readPdf } from './pdf/reader'
-import { fitText, loadJapaneseFont, makeSample, writePdf } from './pdf/output'
+import { createFontResolver, replacementFontLabel, replacementFontWarning, fitText, loadJapaneseFont, makeSample, writePdf } from './pdf/output'
 import type { DocumentSession, Edits, PageModel, Replacement, TextRegion } from './pdf/types'
 import { getLicenseUrl, portableAssets } from './pdf/portable'
+import { originalColor, originalAlign } from './pdf/appearance'
 
 type Snapshot = { edits: Edits; calculation: CalculationRule | null }
 type History = { past: Snapshot[]; present: Snapshot; future: Snapshot[] }
@@ -53,7 +53,7 @@ export default function App() {
   const loadVersion = useRef(0)
   const busy = loading || building || validating
   const saved = selected ? edits[selected.id] : undefined
-  const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? '#202733') || draft.align !== (saved?.align ?? 'left'))
+  const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? originalColor(selected)) || draft.align !== (saved?.align ?? originalAlign(selected)))
   const editCount = Object.keys(edits).length
   const calculatedTarget = calculation?.target.id === selected?.id && !!calculation
   const restriction = selected && model ? editRestriction(selected, model) || (calculatedTarget
@@ -62,7 +62,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selected) { setDraft(null); return }
-    setDraft({ text: saved?.text ?? selected.text, fontSize: saved?.fontSize ?? selected.fontSize, color: saved?.color ?? '#202733', align: saved?.align ?? 'left' })
+    setDraft({ text: saved?.text ?? selected.text, fontSize: saved?.fontSize ?? selected.fontSize, color: saved?.color ?? originalColor(selected), align: saved?.align ?? originalAlign(selected) })
     setActualSize(null)
   }, [selected, saved])
 
@@ -141,8 +141,8 @@ export default function App() {
     setValidating(true); setError(''); setNotice('')
     try {
       const edit: Replacement = { ...draft, region:selected }
-      const { next, font } = await validateEdits({ ...edits, [selected.id]: edit }, calculation)
-      const fitted = fitText(font,edit)
+      const { next, resolveFont } = await validateEdits({ ...edits, [selected.id]: edit }, calculation)
+      const fitted = fitText(await resolveFont(edit),edit)
       setActualSize(fitted.size)
       dispatch({ type:'set', edits: next })
       setNotice(calculation && calculation.sources.some(source => source.id === selected.id)
@@ -152,12 +152,12 @@ export default function App() {
     finally { setValidating(false) }
   }
   async function validateEdits(proposed: Edits, rule: CalculationRule | null) {
-    const doc = await PDFDocument.create(); doc.registerFontkit(fontkit)
-    const font = await doc.embedFont(await loadJapaneseFont(), { subset: true })
-    for (const edit of Object.values(proposed)) fitText(font, edit)
+    const doc = await PDFDocument.create()
+    const resolveFont = createFontResolver(doc, await loadJapaneseFont(), true)
+    for (const edit of Object.values(proposed)) fitText(await resolveFont(edit), edit)
     const next = rule ? recalculate(proposed, rule) : proposed
-    if (rule) fitText(font, next[rule.target.id])
-    return { next, font }
+    if (rule) fitText(await resolveFont(next[rule.target.id]), next[rule.target.id])
+    return { next, resolveFont }
   }
   async function configureCalculation(rule: CalculationRule) {
     if (!model || busy || !canLeaveDraft()) return
@@ -268,7 +268,7 @@ export default function App() {
             <label className="field-label" htmlFor="replacement">変更後のテキスト</label><textarea id="replacement" value={draft.text} disabled={!!restriction || busy} maxLength={300} rows={3} onChange={e=>setDraft({...draft,text:e.target.value})}/><div className="field-hint">1行のテキスト · {draft.text.length}/300</div>
             <div className="field-group"><div><label className="field-label" htmlFor="font-size">文字サイズ</label><div className="number-input"><input id="font-size" type="number" min="4" max="144" step="0.1" value={Number(draft.fontSize.toFixed(2))} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,fontSize:Number(e.target.value)})}/><span>pt</span></div></div><div><label className="field-label" htmlFor="text-color">文字色</label><div className="color-input"><input id="text-color" type="color" value={draft.color} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,color:e.target.value})}/><span>{draft.color.toUpperCase()}</span></div></div></div>
             <label className="field-label" htmlFor="text-align">配置</label><select id="text-align" value={draft.align} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,align:e.target.value as Draft['align']})}><option value="left">左揃え</option><option value="center">中央揃え</option><option value="right">右揃え</option></select>
-            <div className="font-note"><span>フォント</span><strong>Noto Sans JP Regular</strong><small>日本語フォントをPDFに埋め込みます</small></div>
+            <div className="font-note"><span>書体を元に合わせて自動選択</span><strong>{replacementFontLabel({ ...draft, region: selected })}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
             <div className="autofit-note"><Check size={15}/><div>元の領域に合わせて自動調整<small>幅・高さに収まるよう文字を縮小します。{actualSize && ` 適用サイズ ${actualSize.toFixed(1)} pt`}</small></div></div>
             <label className="cover-consent"><input type="checkbox" checked={allowCover} disabled={!!restriction || busy} onChange={e=>setAllowCover(e.target.checked)}/><span>元の文字を白く覆う方式を理解しました。背景はプレビューで確認します。</span></label>
             <button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={!!restriction || busy || !allowCover || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button>
@@ -281,6 +281,6 @@ export default function App() {
 
     <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''}` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.1.0</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
-    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックして内容を変更します。「変更を適用」で実際のPDFプレビューを確認し、「PDFを保存」で別名ダウンロードできます。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元のフォントの字形や太さは維持できません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。保存後の再読み込みでは文字が重複し、再編集できない領域があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定はこのタブ内で保持し、PDFには計算結果を保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
+    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックして内容を変更します。「変更を適用」で実際のPDFプレビューを確認し、「PDFを保存」で別名ダウンロードできます。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元の文字色・サイズ・位置・太さを基準に配置します。一般的な欧文書体は合わせ、再現できない書体は同梱の日本語書体で近づけます。字形や文字間隔が完全に一致するとは限りません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。保存後の再読み込みでは文字が重複し、再編集できない領域があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定はこのタブ内で保持し、PDFには計算結果を保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
   </div>
 }
