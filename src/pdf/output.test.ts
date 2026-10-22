@@ -4,6 +4,7 @@ import { PDFDocument, type PDFFont } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
 import { fitText, makeSample, writePdf } from './output'
 import type { Replacement } from './types'
+import { glyphMetrics, registerGlyphMetrics } from './glyph-metrics'
 
 let font: PDFFont
 let fontBytes: Uint8Array
@@ -16,6 +17,7 @@ beforeAll(async () => {
   fontBytes = new Uint8Array(await readFile(new URL('../../public/fonts/NotoSansJP-Regular.ttf',import.meta.url)))
   const doc=await PDFDocument.create();doc.registerFontkit(fontkit)
   font=await doc.embedFont(fontBytes)
+  registerGlyphMetrics(font, fontBytes)
 })
 
 describe('text placement and validation',()=>{
@@ -47,6 +49,28 @@ describe('text placement and validation',()=>{
     expect(fit.size).toBe(base.fontSize)
     expect(fit.scaleX).toBeCloseTo(0.9)
     expect(fit.width).toBeCloseTo(natural * 0.9)
+  })
+  it('fits digits in a short table cell using their actual outlines, without reserving unrelated descenders',()=>{
+    const edit: Replacement = { ...base, text:'166', fontSize:9, align:'right', region: {
+      ...base.region, tightBounds:true, fontSize:9, x:50, width:15,
+      rect:{x:49.5,y:99,width:16,height:9},baseline:100,
+    } }
+    const fit=fitText(font,edit), ink=glyphMetrics(font,edit.text)!
+    expect(fit.size).toBe(9)
+    expect(edit.region.baseline-ink.descent*fit.size).toBeGreaterThanOrEqual(edit.region.rect.y+0.35)
+    expect(fit.x+ink.left*fit.size*fit.scaleX).toBeGreaterThanOrEqual(edit.region.rect.x+0.1)
+    expect(fit.x+ink.right*fit.size*fit.scaleX).toBeLessThanOrEqual(edit.region.rect.x+edit.region.rect.width-0.1+1e-7)
+  })
+  it('moves a comma baseline within the cell instead of making the replacement illegibly small',()=>{
+    const edit: Replacement = { ...base, text:'30,001', fontSize:9, align:'right', region: {
+      ...base.region, tightBounds:true, fontSize:9, x:50, width:27,
+      rect:{x:49.5,y:99.05,width:28,height:9.18},baseline:100,
+    } }
+    const fit=fitText(font,edit), ink=glyphMetrics(font,edit.text)!
+    expect(fit.size).toBeGreaterThanOrEqual(8)
+    expect(fit.baseline).toBeGreaterThan(100)
+    expect(fit.baseline-ink.descent*fit.size).toBeGreaterThanOrEqual(edit.region.rect.y+0.35-1e-7)
+    expect(fit.baseline+ink.ascent*fit.size).toBeLessThanOrEqual(edit.region.rect.y+edit.region.rect.height-0.35+1e-7)
   })
 })
 

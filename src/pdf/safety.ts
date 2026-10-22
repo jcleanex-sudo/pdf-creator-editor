@@ -1,4 +1,5 @@
 import type { PageModel, Rect, TextRegion } from './types'
+import { pixelBounds } from './bounds'
 
 function overlap(a: Rect, b: Rect) {
   return Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x) > 0.4 && Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y) > 0.4
@@ -9,9 +10,7 @@ export function editRestriction(region: TextRegion, page: PageModel): string | u
   if (page.regions.some(other => other.id !== region.id && overlap(region.screen, other.screen)))
     return '近くの文字と領域が重なっています。ほかの文字を保護するため編集できません。'
   const { pixels, pixelScale: scale } = page
-  const left = Math.max(0,Math.floor(region.screen.x*scale)), top = Math.max(0,Math.floor(region.screen.y*scale))
-  const right = Math.min(pixels.width-1,Math.ceil((region.screen.x+region.screen.width)*scale))
-  const bottom = Math.min(pixels.height-1,Math.ceil((region.screen.y+region.screen.height)*scale))
+  const {left, top, right, bottom} = pixelBounds(region.screen, scale, pixels)
   let count=0
   for (let y=top;y<=bottom;y++) for (let x=left;x<=right;x++) {
     const i=(y*pixels.width+x)*4

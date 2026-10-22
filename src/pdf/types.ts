@@ -13,6 +13,8 @@ export type TextRegion = {
   width: number
   rect: Rect
   screen: Rect
+  /** Empty margins were clipped to protect nearby table rules. */
+  tightBounds?: boolean
   unsupportedReason?: string
   appearance?: OriginalAppearance
 }

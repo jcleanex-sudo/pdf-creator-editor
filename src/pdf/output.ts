@@ -4,6 +4,7 @@ import { storeProject } from './project'
 import fontkit from '@pdf-lib/fontkit'
 import type { Edits, Replacement } from './types'
 import { decodeBase64, portableAssets } from './portable'
+import { glyphMetrics, registerGlyphMetrics } from './glyph-metrics'
 
 const fontPromises = new Map<boolean, Promise<Uint8Array>>()
 export function loadJapaneseFont(bold = false) {
@@ -39,8 +40,11 @@ export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, s
       if ([...edit.text].every(character => charset(font).has(character.codePointAt(0)!))) return font
     }
     return edit.region.appearance?.bold
-      ? embed('NotoSansJP-Bold', async () => pdf.embedFont(await loadJapaneseFont(true), { subset }))
-      : embed('NotoSansJP-Regular', () => pdf.embedFont(regularBytes, { subset }))
+      ? embed('NotoSansJP-Bold', async () => {
+        const bytes = await loadJapaneseFont(true)
+        return registerGlyphMetrics(await pdf.embedFont(bytes, { subset }), bytes)
+      })
+      : embed('NotoSansJP-Regular', async () => registerGlyphMetrics(await pdf.embedFont(regularBytes, { subset }), regularBytes))
   }
 }
 
@@ -69,22 +73,37 @@ export function fitText(font: PDFFont, edit: Replacement) {
   const unsupported = [...new Set([...text].filter(c => !charset(font).has(c.codePointAt(0)!)))]
   if (unsupported.length) throw new Error(`同梱フォントで保存できない文字があります：${unsupported.slice(0, 8).join(' ')}`)
   // Keep both the width and the glyph ascent/descent inside the original region.
-  const ascent = font.heightAtSize(1, { descender: false })
+  const ink = glyphMetrics(font, text)
+  const ascent = ink?.ascent ?? font.heightAtSize(1, { descender: false })
   const fullHeight = font.heightAtSize(1, { descender: true })
-  const descent = Math.max(0, fullHeight - ascent)
+  const descent = ink?.descent ?? Math.max(0, fullHeight - ascent)
   const topSpace = region.rect.y + region.rect.height - region.baseline - 0.35
   const bottomSpace = region.baseline - region.rect.y - 0.35
-  let size = Math.min(edit.fontSize,
-    topSpace / ascent, descent ? bottomSpace / descent : edit.fontSize)
+  let size = region.tightBounds
+    ? Math.min(edit.fontSize, ascent + descent ? (region.rect.height - 0.7) / (ascent + descent) : edit.fontSize)
+    : Math.min(edit.fontSize, ascent ? topSpace / ascent : edit.fontSize, descent ? bottomSpace / descent : edit.fontSize)
   const naturalWidth = text ? font.widthOfTextAtSize(text, size) : 0
   // Preserve the original point size when possible. Modest horizontal fitting
   // avoids making a same-length numeric replacement noticeably shorter.
-  const scaleX = naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
+  let scaleX = naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
   if (naturalWidth * scaleX > region.width) size *= region.width / (naturalWidth * scaleX)
+  if (region.tightBounds) {
+    const inkWidth = ink ? (ink.right-ink.left) * size : (text ? font.widthOfTextAtSize(text, size) : 0)
+    if (inkWidth > 0) scaleX = Math.min(scaleX, (region.rect.width-0.2) / inkWidth)
+  }
   if (!Number.isFinite(size) || size < 4) throw new Error('元の領域に収まりません。文字を短くするか、別の領域を選んでください。')
   const fittedWidth = text ? font.widthOfTextAtSize(text, size) * scaleX : 0
   const offset = edit.align === 'right' ? region.width - fittedWidth : edit.align === 'center' ? (region.width - fittedWidth) / 2 : 0
-  return { size, x: region.x + offset, width: fittedWidth, scaleX }
+  let x = region.x + offset
+  if (region.tightBounds) {
+    const left = ink ? ink.left * size * scaleX : 0
+    const right = ink ? ink.right * size * scaleX : fittedWidth
+    x = Math.max(region.rect.x + 0.1 - left, Math.min(x, region.rect.x + region.rect.width - 0.1 - right))
+  }
+  if (!Number.isFinite(scaleX) || scaleX <= 0) throw new Error('元の領域に収まりません。別の領域を選んでください。')
+  const baseline = region.tightBounds ? Math.max(region.rect.y + 0.35 + descent * size,
+    Math.min(region.baseline, region.rect.y + region.rect.height - 0.35 - ascent * size)) : region.baseline
+  return { size, x, baseline, width: fittedWidth, scaleX }
 }
 
 export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array, calculation: CalculationRule | null = null): Promise<Uint8Array> {
@@ -106,7 +125,7 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
     page.drawRectangle({ ...edit.region.rect, color: rgb(1, 1, 1), borderWidth: 0 })
     if (edit.text) {
       const parts = edit.color.slice(1).match(/../g)!.map(part => parseInt(part, 16) / 255)
-      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, edit.region.baseline))
+      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, fit.baseline))
       page.drawText(edit.text, { x: 0, y: 0, size: fit.size, font, color: rgb(parts[0], parts[1], parts[2]) })
       page.pushOperators(popGraphicsState())
     }

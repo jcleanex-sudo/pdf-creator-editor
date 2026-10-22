@@ -5,6 +5,7 @@ import { SAMPLE_TEMPLATE, calculateTotal, type CalculationRule } from './calcula
 import { fontAppearance, textPaints } from './appearance'
 import { readProject } from './project'
 import { editRestriction } from './safety'
+import { refineTextBounds } from './bounds'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import type { DocumentSession, Edits, PageModel, Rect, TextRegion } from './types'
 import { EmbeddedBinaryDataFactory, portableAssets } from './portable'
@@ -113,7 +114,7 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
   const paints = textPaints(operators.fnArray.map((value, index) => ({ name: operatorNames[value], args: operators.argsArray[index] })))
   const regions: TextRegion[] = []
   const items = content.items.filter((item): item is TextItem => 'str' in item && !!item.str.trim())
-  const pixelScale = Math.min(1.5, Math.sqrt(8_000_000 / (viewport.width*viewport.height)))
+  const pixelScale = Math.min(3, Math.sqrt(8_000_000 / (viewport.width*viewport.height)))
   const raster = page.getViewport({ scale: pixelScale })
   const canvas = document.createElement('canvas')
   canvas.width = Math.ceil(raster.width); canvas.height = Math.ceil(raster.height)
@@ -169,6 +170,20 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
   if (unreliableBackground) for (const region of regions)
     region.unsupportedReason ??= '文字の切り抜きや透明マスクを使ったPDFは、背景を保護するため編集できません。'
   const pixels = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height)
+  if (!unreliableBackground && regions.some(region => !region.unsupportedReason)) {
+    await page.render({ canvas, viewport: raster, background: 'rgb(255,255,255)' }).promise
+    const foreground = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height)
+    for (const region of regions) {
+      if (region.unsupportedReason) continue
+      const refined = refineTextBounds(region.screen, pixels, foreground, pixelScale)
+      if (!refined) continue
+      const [left, top] = viewport.convertToPdfPoint(refined.x, refined.y)
+      const [right, bottom] = viewport.convertToPdfPoint(refined.x + refined.width, refined.y + refined.height)
+      region.rect = { x: left, y: bottom, width: right-left, height: top-bottom }
+      region.screen = refined
+      region.tightBounds = true
+    }
+  }
   canvas.width = canvas.height = 0
   // Extra metadata is needed for font identification, not for retaining a
   // second copy of every font program after the browser has loaded it.
