@@ -87,7 +87,36 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
   const raster = page.getViewport({ scale: pixelScale })
   const canvas = document.createElement('canvas')
   canvas.width = Math.ceil(raster.width); canvas.height = Math.ceil(raster.height)
-  await page.render({ canvas, viewport: raster, background: 'rgb(255,255,255)' }).promise
+  // Analyze the background without painting glyphs. Including glyph pixels in
+  // this raster made text color and platform antialiasing look like a colored
+  // background, even in the bundled sample on a plain white page.
+  const textPaint = new Set([pdfjs.OPS.showText, pdfjs.OPS.showSpacedText,
+    pdfjs.OPS.nextLineShowText, pdfjs.OPS.nextLineSetSpacingShowText])
+  let unreliableBackground = false
+  let annotationDepth = 0
+  await page.render({ canvas, viewport: raster, background: 'rgb(255,255,255)',
+    operationsFilter(index, operators) {
+      const operation = operators.fnArray[index]
+      // Text clips, soft masks and knockout groups can make later graphics
+      // depend on glyphs. Do not edit pages where omitting them is unreliable.
+      if (operation === pdfjs.OPS.setTextRenderingMode && operators.argsArray[index][0] >= 4)
+        unreliableBackground = true
+      if (operation === pdfjs.OPS.beginGroup) {
+        const group = operators.argsArray[index][0]
+        if (group.smask || group.knockout) unreliableBackground = true
+      }
+      if (operation === pdfjs.OPS.setGState && operators.argsArray[index][0].some(
+        ([key, value]: [string, unknown]) => key === 'SMask' && !!value))
+        unreliableBackground = true
+      // Annotation appearance text is not in getTextContent's regions. Keep
+      // it in this raster so a cover cannot erase an overlapping annotation.
+      if (operation === pdfjs.OPS.beginAnnotation) annotationDepth++
+      if (operation === pdfjs.OPS.endAnnotation) annotationDepth--
+      return annotationDepth > 0 || !textPaint.has(operation)
+    },
+  }).promise
+  if (unreliableBackground) for (const region of regions)
+    region.unsupportedReason ??= '文字の切り抜きや透明マスクを使ったPDFは、背景を保護するため編集できません。'
   const pixels = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height)
   canvas.width = canvas.height = 0
   return { width: viewport.width, height: viewport.height, regions, pixels, pixelScale }

@@ -25,6 +25,7 @@ export type PageModel = {
   width: number
   height: number
   regions: TextRegion[]
+  /** Background analysis raster with text painting omitted. */
   pixels: ImageData
   pixelScale: number
 }

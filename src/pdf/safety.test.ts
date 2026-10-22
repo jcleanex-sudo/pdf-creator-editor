@@ -10,13 +10,8 @@ function page(background=255): PageModel {
   return {width:100,height:100,regions:[region],pixelScale:1,pixels:{data,width:100,height:100,colorSpace:'srgb'} as ImageData}
 }
 describe('background protection',()=>{
-  it('allows isolated black text on a white area',()=>{
-    const model=page()
-    for(let y=20;y<25;y++)for(let x=15;x<30;x++) {
-      const i=(y*100+x)*4
-      model.pixels.data[i]=model.pixels.data[i+1]=model.pixels.data[i+2]=30
-    }
-    expect(editRestriction(region,model)).toBeUndefined()
+  it('allows text over an independently rendered white background',()=>{
+    expect(editRestriction(region,page())).toBeUndefined()
   })
   it('blocks nonwhite and colored backgrounds',()=>{
     expect(editRestriction(region,page(230))).toContain('白い背景')
@@ -35,5 +30,11 @@ describe('background protection',()=>{
       edge.pixels.data[i]=edge.pixels.data[i+1]=edge.pixels.data[i+2]=0
     }
     expect(editRestriction(region,edge)).toContain('白い背景')
+  })
+  it('protects small graphics inside otherwise white areas',()=>{
+    const model=page()
+    const i=(22*100+25)*4
+    model.pixels.data[i]=model.pixels.data[i+1]=model.pixels.data[i+2]=80
+    expect(editRestriction(region,model)).toContain('白い背景')
   })
 })
