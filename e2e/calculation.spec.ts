@@ -10,11 +10,10 @@ test('sample recalculates 209,000, undoes both amounts together, rejects bad amo
   await text(page, '150,000').click()
   await expect(page.locator('.calculation-panel summary')).toContainText('有効・税率10%')
   await page.getByLabel('変更後のテキスト').fill('160,000')
-  await page.locator('.cover-consent input').check()
   await page.getByRole('button', { name: '変更を適用', exact: true }).click()
   await saveReady(page)
   await expect(page.locator('.message')).toContainText('209,000円')
-  await text(page, '198,000').click()
+  await text(page, '209,000').click()
   await expect(page.getByLabel('変更後のテキスト')).toHaveValue('209,000')
   await expect(page.getByLabel('変更後のテキスト')).toBeDisabled()
   await page.getByRole('button', { name: '元に戻す', exact: true }).click()
@@ -24,7 +23,7 @@ test('sample recalculates 209,000, undoes both amounts together, rejects bad amo
   await page.getByRole('button', { name: 'やり直す', exact: true }).click()
   await saveReady(page)
   await expect(page.getByLabel('変更後のテキスト')).toHaveValue('209,000')
-  await text(page, '150,000').click()
+  await text(page, '160,000').click()
   await page.getByRole('button', { name: 'この変更を取り消す', exact: true }).click()
   await saveReady(page)
   await text(page, '198,000').click()
@@ -47,8 +46,8 @@ test('sample recalculates 209,000, undoes both amounts together, rejects bad amo
   await reopened.locator('input[type=file]').setInputFiles(output)
   await expect(text(reopened, '160,000')).toBeAttached()
   await expect(text(reopened, '209,000')).toBeAttached()
-  // Old hidden values must never be mistaken for a fresh calculation model.
-  await expect(reopened.locator('.calculation-panel summary')).toContainText('設定する')
+  // Restore explicit source bindings rather than inferring hidden text.
+  await expect(reopened.locator('.calculation-panel summary')).toContainText('有効・税率10%')
 })
 
 test('configures an uploaded PDF explicitly, recalculates decimal tax, and undoes the rule and its edits', async ({ page }) => {
@@ -73,7 +72,7 @@ test('configures an uploaded PDF explicitly, recalculates decimal tax, and undoe
   await page.getByLabel('変更後のテキスト').fill('150')
   await page.getByRole('button', { name: '変更を適用', exact: true }).click()
   await saveReady(page)
-  await text(page, '300').click()
+  await text(page, '378').click()
   await expect(page.getByLabel('変更後のテキスト')).toHaveValue('378')
   await page.getByRole('button', { name: '元に戻す', exact: true }).click()
   await saveReady(page)

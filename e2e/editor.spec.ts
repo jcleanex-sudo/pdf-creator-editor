@@ -51,7 +51,6 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
     ;(window as unknown as {originalPixels:ImageData}).originalPixels=canvas.getContext('2d')!.getImageData(0,0,canvas.width,canvas.height)
   })
   await page.getByLabel('変更後のテキスト').fill('250,000')
-  await page.getByRole('checkbox').check()
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
   await ready(page,2);await saveReady(page)
   await textButton(page,'株式会社サンプル 御中').click()
@@ -80,7 +79,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await page.getByRole('button',{name:'次のページ',exact:true}).click()
   await expect(textButton(page,'ご利用について')).toBeVisible()
   await page.getByRole('button',{name:'前のページ',exact:true}).click()
-  await expect(textButton(page,'150,000')).toBeVisible()
+  await expect(textButton(page,'250,000')).toBeVisible()
 
   const downloadEvent=page.waitForEvent('download')
   await page.getByRole('button',{name:'PDFを保存',exact:true}).click()
@@ -95,8 +94,10 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await expect(textButton(reopened,'250,000')).toBeAttached()
   await expect(textButton(reopened,'株式会社テスト 御中')).toBeAttached()
   await expect(textButton(reopened,'308,000')).toBeAttached()
-  // The old text remains: verify our no-redaction warning describes actual behavior.
-  await expect(textButton(reopened,'150,000')).toBeAttached()
+  // Restored editing exposes the visible replacement, not the hidden old value.
+  await expect(textButton(reopened,'150,000')).toHaveCount(0)
+  await textButton(reopened,'250,000').click()
+  await expect(reopened.getByLabel('変更後のテキスト')).toBeEnabled()
   expect(external).toEqual([])
   expect(errors).toEqual([])
 })
@@ -111,7 +112,6 @@ test('rejects invalid inputs and unsupported edits, preserving the current docum
   await page.locator('input[type=file]').setInputFiles({name:'too-large.pdf',mimeType:'application/pdf',buffer:Buffer.alloc(26*1024*1024)})
   await expect(page.getByRole('alert')).toContainText('25 MB')
   await textButton(page,'150,000').click()
-  await page.getByRole('checkbox').check()
   await page.getByLabel('変更後のテキスト').fill('一行目\n二行目')
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
   await expect(page.getByRole('alert')).toContainText('改行')
@@ -120,7 +120,7 @@ test('rejects invalid inputs and unsupported edits, preserving the current docum
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
   await expect(page.getByRole('alert')).toContainText('保存できない文字')
   await page.getByRole('button',{name:'PDFを保存',exact:true}).click()
-  await expect(page.getByRole('alert')).toContainText('入力中の変更')
+  await expect(page.getByRole('alert')).toContainText('保存できない文字')
 })
 
 test('handles PDFs without text and blocks editing rotated pages',async({page})=>{

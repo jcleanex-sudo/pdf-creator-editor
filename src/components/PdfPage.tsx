@@ -43,7 +43,7 @@ export function PdfPage({ pdf, pageIndex, model, zoom, selected, edits, disabled
         className={`text-hit ${selected === region.id ? 'selected' : ''} ${edits[region.id] ? 'edited' : ''}`}
         style={{ left: region.screen.x*zoom, top: region.screen.y*zoom, width: region.screen.width*zoom, height: region.screen.height*zoom }}
         type="button" disabled={disabled}
-        aria-label={`文字を選択: ${region.text}`} aria-pressed={selected === region.id}
+        aria-label={`文字を選択: ${edits[region.id]?.text ?? region.text}`} aria-pressed={selected === region.id}
         title={edits[region.id]?.text ?? region.text}
         onClick={() => onSelect(region)}
       />)}

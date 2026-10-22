@@ -64,7 +64,7 @@ export function CalculationPanel({ model, rule, edits, busy, onApply, onDisable,
         {summary && <output className="calculation-summary">{summary}</output>}
         <button type="button" className="button secondary" disabled={busy || !proposal || !sources.length} onClick={() => proposal && onApply(proposal)}>計算設定を適用</button>
         {rule && <button type="button" className="text-button" disabled={busy} onClick={onDisable}>自動計算を解除</button>}
-        <p>合計欄は白く覆って更新します。設定はこのタブ内で保持し、PDFには計算結果を保存します。</p>
+        <p>合計欄は白く覆って更新します。設定と計算結果をPDFの編集データにも保存します。</p>
       </div>}
   </details>
 }

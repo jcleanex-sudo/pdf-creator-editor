@@ -39,7 +39,6 @@ test('preserves source colors, standard font faces and Japanese bold without cha
     await page.getByLabel('変更後のテキスト').fill(replacement)
     await expect(page.locator('.font-note strong')).toHaveText(font)
     if (original === 'Latin only') await expect(page.locator('.font-warning')).toContainText('元の欧文書体')
-    await page.locator('.cover-consent input').check()
     await page.getByRole('button', { name: '変更を適用', exact: true }).click()
     await expect(page.getByRole('button', { name: 'PDFを保存', exact: true })).toBeEnabled()
   }

@@ -1,5 +1,6 @@
 import { PDFDocument, PDFName, PDFString, StandardFonts, StandardFontEmbedder, concatTransformationMatrix, pushGraphicsState, popGraphicsState, rgb, type PDFFont } from 'pdf-lib'
-import { SAMPLE_TEMPLATE } from './calculation'
+import { SAMPLE_TEMPLATE, type CalculationRule } from './calculation'
+import { storeProject } from './project'
 import fontkit from '@pdf-lib/fontkit'
 import type { Edits, Replacement } from './types'
 import { decodeBase64, portableAssets } from './portable'
@@ -86,7 +87,7 @@ export function fitText(font: PDFFont, edit: Replacement) {
   return { size, x: region.x + offset, width: fittedWidth, scaleX }
 }
 
-export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array): Promise<Uint8Array> {
+export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array, calculation: CalculationRule | null = null): Promise<Uint8Array> {
   const entries = Object.values(edits)
   if (!entries.length) return original.slice()
   const pdf = await PDFDocument.load(original)
@@ -110,6 +111,7 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
       page.pushOperators(popGraphicsState())
     }
   }
+  storeProject(pdf, original, edits, calculation)
   return pdf.save()
 }
 

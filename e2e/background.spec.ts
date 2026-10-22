@@ -35,7 +35,6 @@ test('edits colored text on white while protecting backgrounds, images and lines
   await page.getByRole('button', { name: '文字を選択: Blue on white', exact: true }).click()
   await expect(page.getByLabel('変更後のテキスト')).toBeEnabled()
   await page.getByLabel('変更後のテキスト').fill('250,000')
-  await page.getByRole('checkbox').check()
   await page.getByRole('button', { name: '変更を適用', exact: true }).click()
   await expect(page.locator('.status-left')).toContainText('1箇所の変更')
   await expect(page.getByRole('button', { name: 'PDFを保存', exact: true })).toBeEnabled()

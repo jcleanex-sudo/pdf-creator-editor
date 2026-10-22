@@ -1,10 +1,12 @@
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { PDFDocument, PDFSignature, PDFName, PDFString } from 'pdf-lib'
-import { SAMPLE_TEMPLATE } from './calculation'
+import { SAMPLE_TEMPLATE, calculateTotal, type CalculationRule } from './calculation'
 import { fontAppearance, textPaints } from './appearance'
+import { readProject } from './project'
+import { editRestriction } from './safety'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
-import type { DocumentSession, PageModel, Rect, TextRegion } from './types'
+import type { DocumentSession, Edits, PageModel, Rect, TextRegion } from './types'
 import { EmbeddedBinaryDataFactory, portableAssets } from './portable'
 
 const embedded=portableAssets()
@@ -22,12 +24,13 @@ export function readPdf(bytes: Uint8Array) {
     ...(embedded ? {useWorkerFetch:false,BinaryDataFactory:EmbeddedBinaryDataFactory} : {}) })
 }
 
-export async function openPdf(bytes: Uint8Array, name: string): Promise<DocumentSession> {
+export async function openPdf(bytes: Uint8Array, name: string, restore = true): Promise<DocumentSession> {
   if (bytes.length > MAX_FILE_SIZE) throw new Error('Phase 1では25 MBまでのPDFを開けます。')
   if (!new TextDecoder('latin1').decode(bytes.slice(0, 1024)).includes('%PDF-')) throw new Error('PDFファイルを選択してください。')
   let pageCount: number
   let hasSignature: boolean
   let sampleEstimate = false
+  let stored: ReturnType<typeof readProject> = null
   try {
     const parsed = await PDFDocument.load(bytes)
     const template = parsed.catalog.get(PDFName.of('PDFEditorTemplate'))
@@ -35,6 +38,7 @@ export async function openPdf(bytes: Uint8Array, name: string): Promise<Document
     pageCount = parsed.getPageCount()
     if (!Number.isInteger(pageCount) || pageCount < 1) throw new Error('Invalid page tree')
     hasSignature = parsed.getForm().getFields().some(field => field instanceof PDFSignature)
+    if (restore && !hasSignature) stored = readProject(parsed)
   }
   catch (error) {
     if (String(error).toLowerCase().includes('encrypt')) throw new Error('パスワード付きPDFにはまだ対応していません。保護されていないPDFを使用してください。')
@@ -42,6 +46,39 @@ export async function openPdf(bytes: Uint8Array, name: string): Promise<Document
   }
   if (pageCount > MAX_PAGES) throw new Error('Phase 1では200ページまでのPDFに対応しています。')
   if (hasSignature) throw new Error('署名欄を含むPDFは、署名を保護するためPhase 1では開けません。')
+  if (stored) {
+    const session = await openPdf(stored.source, name, false)
+    try {
+      if (session.pdf.numPages !== pageCount) throw new Error('ページ数が一致しません。')
+      const ids = new Set(stored.project.edits.map(edit => edit.id))
+      if (stored.project.calculation) {
+        ids.add(stored.project.calculation.target)
+        stored.project.calculation.sources.forEach(id => ids.add(id))
+      }
+      const regions = new Map<string, TextRegion>()
+      for (const index of new Set([...ids].map(id => Number(id.split(':')[0])))) {
+        const model = await loadPage(session, index)
+        for (const region of model.regions) if (ids.has(region.id)) {
+          if (editRestriction(region, model)) throw new Error('編集できない文字が含まれています。')
+          regions.set(region.id, region)
+        }
+      }
+      if (regions.size !== ids.size) throw new Error('対象の文字が見つかりません。')
+      const edits: Edits = Object.fromEntries(stored.project.edits.map(({ id, ...edit }) => [id, { ...edit, region: regions.get(id)! }]))
+      const rule = stored.project.calculation
+      const calculation: CalculationRule | null = rule ? { sources: rule.sources.map(id => regions.get(id)!), target: regions.get(rule.target)!, taxPercent: rule.taxPercent } : null
+      if (calculation) {
+        const { total } = calculateTotal(calculation, edits)
+        if (edits[calculation.target.id]?.text !== total.toLocaleString('ja-JP')) throw new Error('計算結果が一致しません。')
+      }
+      session.restored = { edits, calculation }
+      session.size = bytes.length
+      return session
+    } catch {
+      await session.pdf.loadingTask.destroy()
+      throw new Error('編集データを復元できません。元のPDFを開いてください。')
+    }
+  }
   const task = readPdf(bytes)
   try {
     const pdf = await task.promise

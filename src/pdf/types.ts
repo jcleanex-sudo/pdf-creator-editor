@@ -1,5 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type { OriginalAppearance } from './appearance'
+import type { CalculationRule } from './calculation'
 
 export type Rect = { x: number; y: number; width: number; height: number }
 export type TextRegion = {
@@ -38,4 +39,5 @@ export type DocumentSession = {
   pageCache: Map<number, Promise<PageModel>>
   size: number
   sampleEstimate: boolean
+  restored?: { edits: Edits; calculation: CalculationRule | null }
 }

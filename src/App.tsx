@@ -13,10 +13,10 @@ import { originalColor, originalAlign } from './pdf/appearance'
 
 type Snapshot = { edits: Edits; calculation: CalculationRule | null }
 type History = { past: Snapshot[]; present: Snapshot; future: Snapshot[] }
-type Action = { type: 'set'; edits: Edits; calculation?: CalculationRule | null } | { type: 'clear'; calculation?: CalculationRule | null } | { type: 'undo' | 'redo' }
+type Action = { type: 'set'; edits: Edits; calculation?: CalculationRule | null } | { type: 'clear'; edits?: Edits; calculation?: CalculationRule | null } | { type: 'undo' | 'redo' }
 const emptyHistory: History = { past: [], present: { edits: {}, calculation: null }, future: [] }
 function historyReducer(state: History, action: Action): History {
-  if (action.type === 'clear') return { past: [], present: { edits: {}, calculation: action.calculation ?? null }, future: [] }
+  if (action.type === 'clear') return { past: [], present: { edits: action.edits ?? {}, calculation: action.calculation ?? null }, future: [] }
   if (action.type === 'set') return { past: [...state.past.slice(-39), state.present], present: {
     edits: action.edits, calculation: action.calculation === undefined ? state.present.calculation : action.calculation,
   }, future: [] }
@@ -34,7 +34,7 @@ export default function App() {
   const { edits, calculation } = history.present
   const [pageIndex, setPageIndex] = useState(0)
   const [model, setModel] = useState<PageModel | null>(null)
-  const [preview, setPreview] = useState<{ pdf: PDFDocumentProxy; bytes: Uint8Array; edits: Edits } | null>(null)
+  const [preview, setPreview] = useState<{ pdf: PDFDocumentProxy; bytes: Uint8Array; edits: Edits; calculation: CalculationRule | null } | null>(null)
   const [loading, setLoading] = useState(false)
   const [building, setBuilding] = useState(false)
   const [validating, setValidating] = useState(false)
@@ -47,7 +47,7 @@ export default function App() {
   const [zoom, setZoom] = useState(1)
   const [dragging, setDragging] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
-  const [allowCover, setAllowCover] = useState(false)
+  const [downloadRequested, setDownloadRequested] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const workspace = useRef<HTMLDivElement>(null)
   const loadVersion = useRef(0)
@@ -81,20 +81,26 @@ export default function App() {
     let task: ReturnType<typeof readPdf> | undefined
     setPreviewError(false)
     if (!Object.keys(edits).length) {
-      setPreview({ pdf: session.pdf, bytes: session.bytes, edits }); setBuilding(false)
+      setPreview({ pdf: session.pdf, bytes: session.bytes, edits, calculation }); setBuilding(false)
       return
     }
     setBuilding(true)
     void (async () => {
-      const bytes = await writePdf(session.bytes, edits, await loadJapaneseFont())
+      const bytes = await writePdf(session.bytes, edits, await loadJapaneseFont(), calculation)
       if (canceled) return
       task = readPdf(bytes)
       owned = await task.promise
       if (canceled) { await owned.loadingTask.destroy(); return }
-      setPreview({ pdf: owned, bytes, edits }); setBuilding(false)
+      setPreview({ pdf: owned, bytes, edits, calculation }); setBuilding(false)
     })().catch(e => { if (!canceled) { setError(messageOf(e)); setBuilding(false); setPreviewError(true) } })
     return () => { canceled = true; if (owned) void owned.loadingTask.destroy(); else if (task) void task.destroy() }
-  }, [session,edits])
+  }, [session,edits,calculation])
+
+  useEffect(() => {
+    if (!downloadRequested) return
+    if (previewError) { setDownloadRequested(false); return }
+    if (!busy && preview?.edits === edits && preview.calculation === calculation && !dirty) download()
+  })
 
   useEffect(() => () => { if (session) void session.pdf.loadingTask.destroy() }, [session])
   useEffect(() => {
@@ -119,7 +125,9 @@ export default function App() {
       const firstPage = await loadPage(next,0).catch(async e => { await next.pdf.loadingTask.destroy(); throw e })
       if (version !== loadVersion.current) { await next.pdf.loadingTask.destroy(); return }
       setPreview(null); setSelected(null); setModel(null)
-      setSession(next); setPageIndex(0); dispatch({ type:'clear', calculation: next.sampleEstimate ? sampleCalculation(firstPage) : null }); setAllowCover(false); setZoom(1)
+      setSession(next); setPageIndex(0); dispatch({ type:'clear', edits: next.restored?.edits,
+        calculation: next.restored ? next.restored.calculation : next.sampleEstimate ? sampleCalculation(firstPage) : null }); setDownloadRequested(false); setZoom(1)
+      if (next.restored) setNotice('保存時の編集データから再開しました。別のアプリで保存後に加えた変更は引き継がれないため、プレビューをご確認ください。')
     } catch (e) { if (version === loadVersion.current) setError(messageOf(e)) }
     finally { if (version === loadVersion.current) setLoading(false) }
   }
@@ -136,8 +144,9 @@ export default function App() {
     try { await openBytes(await makeSample(await loadJapaneseFont()),'サンプル見積書.pdf') }
     catch(e) { setError(messageOf(e)); setLoading(false) }
   }
-  async function applyEdit() {
-    if (!draft || !selected || !session || !model || restriction || !allowCover || busy) return
+  async function applyEdit(saveAfter = false) {
+    if (!draft || !selected || !session || !model || busy) return
+    if (restriction) { setError(restriction); return }
     setValidating(true); setError(''); setNotice('')
     try {
       const edit: Replacement = { ...draft, region:selected }
@@ -145,6 +154,7 @@ export default function App() {
       const fitted = fitText(await resolveFont(edit),edit)
       setActualSize(fitted.size)
       dispatch({ type:'set', edits: next })
+      if (saveAfter) setDownloadRequested(true)
       setNotice(calculation && calculation.sources.some(source => source.id === selected.id)
         ? `明細と合計を更新しました。合計 ${formatAmount(calculateTotal(calculation, next).total)}円（消費税${calculation.taxPercent}%）。`
         : '変更を反映しました。保存前にプレビューをご確認ください。')
@@ -167,7 +177,7 @@ export default function App() {
         throw new Error('自動計算には、同じページの編集できる金額欄を選択してください。')
       const { next } = await validateEdits(edits, rule)
       dispatch({ type:'set', edits: next, calculation: rule })
-      setSelected(null); setAllowCover(true)
+      setSelected(null)
       setNotice('自動計算を設定しました。明細金額を変更すると合計も更新します。')
     } catch (error) { setError(messageOf(error)) }
     finally { setValidating(false) }
@@ -184,8 +194,9 @@ export default function App() {
     finally { setValidating(false) }
   }
   function download() {
-    if (!session || !preview || preview.edits !== edits || busy || previewError) return
-    if (dirty) { setError('入力中の変更があります。「変更を適用」してから保存してください。'); return }
+    if (!session || !preview || preview.edits !== edits || preview.calculation !== calculation || busy || previewError) return
+    if (dirty) { void applyEdit(true); return }
+    setDownloadRequested(false)
     const url = URL.createObjectURL(new Blob([preview.bytes.slice().buffer], { type:'application/pdf' }))
     const anchor = document.createElement('a')
     anchor.href=url; anchor.download=`${session.name.replace(/\.pdf$/iu,'')}_edited.pdf`
@@ -228,7 +239,7 @@ export default function App() {
       <span className="toolbar-divider"/>
       <span className="tool-mode"><MousePointer2 size={15}/>文字を編集</span>
       <div className="toolbar-file">{session ? <><FileText size={15}/><span title={session.name}>{session.name}</span>{editCount>0 && <span className="unsaved-dot" title={`${editCount}箇所の変更`}/>}</> : <span>ファイルを開いて、編集をはじめましょう</span>}</div>
-      <button className="button primary save-button" onClick={download} disabled={!session || !preview || preview.edits !== edits || busy || previewError}><ArrowDownToLine size={17}/>PDFを保存</button>
+      <button className="button primary save-button" onClick={download} disabled={!session || !preview || preview.edits !== edits || preview.calculation !== calculation || busy || previewError}><ArrowDownToLine size={17}/>PDFを保存</button>
     </div>
 
     {(error || notice) && <div className={`message ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}><span>{error || notice}</span><button className="icon-button" aria-label="通知を閉じる" onClick={() => { setError(''); setNotice('') }}><X size={15}/></button></div>}
@@ -257,6 +268,10 @@ export default function App() {
       </section>
 
       <aside className="properties-panel"><div className="panel-title"><Type size={17}/><h2>テキスト編集</h2>{selected && <button className="icon-button" aria-label="選択を解除" onClick={()=>{if(canLeaveDraft())setSelected(null)}}><X size={15}/></button>}</div>
+        {model && model.regions.length > 0 && <div className="text-picker"><label htmlFor="text-picker">編集する文字を選択</label><select id="text-picker" value={selected?.id ?? ''} disabled={busy} onChange={event => {
+          const region = model.regions.find(region => region.id === event.target.value)
+          if (region) chooseRegion(region)
+        }}><option value="">PDF上をクリック、または一覧から選択</option>{model.regions.slice(0,3000).map(region => <option key={region.id} value={region.id}>{edits[region.id]?.text || region.text}</option>)}</select></div>}
         {model && <CalculationPanel model={model} rule={calculation} edits={edits} busy={busy}
           onApply={rule => void configureCalculation(rule)}
           onDisable={() => { if (!busy && canLeaveDraft()) { dispatch({ type:'set', edits, calculation:null }); setSelected(null); setNotice('自動計算を解除しました。現在の合計値は残ります。') } }}
@@ -266,21 +281,20 @@ export default function App() {
           {restriction && <div className="restriction-note" role="status"><Info size={16}/><span>{restriction}</span></div>}
           <div className="text-editor-controls">
             <label className="field-label" htmlFor="replacement">変更後のテキスト</label><textarea id="replacement" value={draft.text} disabled={!!restriction || busy} maxLength={300} rows={3} onChange={e=>setDraft({...draft,text:e.target.value})}/><div className="field-hint">1行のテキスト · {draft.text.length}/300</div>
+            {!restriction && <><p className="cover-notice">元の文字を白く覆って変更します。保存前にプレビューで確認してください。元の文字はPDF内に残ります。</p><button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={busy || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button><p className="save-hint">「PDFを保存」でも入力中の変更を反映できます。</p></>}
             <div className="field-group"><div><label className="field-label" htmlFor="font-size">文字サイズ</label><div className="number-input"><input id="font-size" type="number" min="4" max="144" step="0.1" value={Number(draft.fontSize.toFixed(2))} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,fontSize:Number(e.target.value)})}/><span>pt</span></div></div><div><label className="field-label" htmlFor="text-color">文字色</label><div className="color-input"><input id="text-color" type="color" value={draft.color} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,color:e.target.value})}/><span>{draft.color.toUpperCase()}</span></div></div></div>
             <label className="field-label" htmlFor="text-align">配置</label><select id="text-align" value={draft.align} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,align:e.target.value as Draft['align']})}><option value="left">左揃え</option><option value="center">中央揃え</option><option value="right">右揃え</option></select>
             <div className="font-note"><span>書体を元に合わせて自動選択</span><strong>{replacementFontLabel({ ...draft, region: selected })}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
             <div className="autofit-note"><Check size={15}/><div>元の領域に合わせて自動調整<small>幅・高さに収まるよう文字を縮小します。{actualSize && ` 適用サイズ ${actualSize.toFixed(1)} pt`}</small></div></div>
-            <label className="cover-consent"><input type="checkbox" checked={allowCover} disabled={!!restriction || busy} onChange={e=>setAllowCover(e.target.checked)}/><span>元の文字を白く覆う方式を理解しました。背景はプレビューで確認します。</span></label>
-            <button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={!!restriction || busy || !allowCover || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button>
             {saved && !calculatedTarget && <button type="button" className="text-button reset-button" disabled={busy} onClick={()=>void resetSelectedEdit()}><RotateCcw size={14}/>この変更を取り消す</button>}
           </div>
-        </div> : <div className="empty-properties"><div className="cursor-icon"><MousePointer2 size={29}/><span>文字</span></div><h3>編集したい文字を選択</h3><p>PDF上の文字や数字をクリックすると、<br/>ここで内容を変更できます。</p><div className="step-list"><div><span>1</span>PDFファイルを開く</div><div><span>2</span>文字を選んで変更する</div><div><span>3</span>PDFを保存する</div></div></div>}
+        </div> : <div className="empty-properties"><div className="cursor-icon"><MousePointer2 size={29}/><span>文字</span></div><h3>編集したい文字を選択</h3><p>PDF上をクリックするか、上の一覧から<br/>文字を選んで変更できます。</p><div className="step-list"><div><span>1</span>PDFファイルを開く</div><div><span>2</span>文字を選んで変更する</div><div><span>3</span>PDFを保存する</div></div></div>}
         <div className="limitation-note"><Info size={16}/><div><strong>編集できる範囲について</strong><p>Phase 1は白背景の横書き文字に対応。元の文字はPDF内に残ります。機密情報の削除には使えません。</p><button type="button" onClick={()=>setShowHelp(true)}>詳しい制限を見る<ArrowRight size={12}/></button></div></div>
       </aside>
     </main>
 
     <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''}` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.1.0</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
-    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックして内容を変更します。「変更を適用」で実際のPDFプレビューを確認し、「PDFを保存」で別名ダウンロードできます。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元の文字色・サイズ・位置・太さを基準に配置します。一般的な欧文書体は合わせ、再現できない書体は同梱の日本語書体で近づけます。字形や文字間隔が完全に一致するとは限りません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。保存後の再読み込みでは文字が重複し、再編集できない領域があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定はこのタブ内で保持し、PDFには計算結果を保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
+    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックするか一覧から選んで内容を変更します。「変更を適用」でプレビューを確認し、「PDFを保存」で別名ダウンロードできます。保存ボタンは入力中の変更も反映します。</p><h3>白い背景の横書き文字に対応</h3><p>元の領域を白く覆い、日本語フォントで新しい文字を重ねます。背景色・画像・回転・縦書き・重なった文字は対象外です。背景判定は推定のため、保存前に必ずプレビューを確認してください。元の文字色・サイズ・位置・太さを基準に配置します。一般的な欧文書体は合わせ、再現できない書体は同梱の日本語書体で近づけます。字形や文字間隔が完全に一致するとは限りません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。このバージョンで保存したPDFには、元のPDFと編集データを含めて保存し、このツールで再編集できます。元のデータも残るためファイルサイズは増えます。旧バージョンや別アプリで保存したPDFには、文字の重複により再編集できない領域があります。別アプリで加えた変更は、編集データからの再開時に引き継がれない場合があります。</p></div><h3>Phase 1の対応範囲</h3><p>25 MB・200ページまで。スキャン画像は表示のみ。OCR、パスワード付きPDF、署名欄のあるPDF、縦書き、改行を含む文字変更は対象外です。電子署名済みPDFは使用しないでください。編集履歴はこのタブ内だけに保持されます。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定と計算結果をPDFの編集データにも保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
   </div>
 }

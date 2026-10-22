@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { PDFDocument } from 'pdf-lib'
 
 test('self-contained HTML renders and edits PDFs offline without a server or form permissions',async({page,context},info)=>{
+  test.setTimeout(120_000)
   const html=await readFile('release/PDF-Editor.html','utf8')
   const errors:string[]=[],network:string[]=[]
   page.on('pageerror',e=>errors.push(e.message))
@@ -23,7 +24,6 @@ test('self-contained HTML renders and edits PDFs offline without a server or for
   await expect(text('150,000')).toBeVisible()
   await text('150,000').click()
   await app.getByLabel('変更後のテキスト').fill('275,000')
-  await app.getByRole('checkbox').check()
   await app.getByRole('button',{name:'変更を適用',exact:true}).click()
   await expect(app.locator('.status-left')).toContainText('2箇所の変更')
   await expect(app.getByRole('button',{name:'PDFを保存',exact:true})).toBeEnabled()
@@ -45,6 +45,13 @@ test('self-contained HTML renders and edits PDFs offline without a server or for
   await expect(text('275,000')).toBeAttached()
   await expect(text('株式会社オフライン 御中')).toBeAttached()
   await expect(text('335,500')).toBeAttached()
+  await text('275,000').click()
+  await expect(app.getByLabel('変更後のテキスト')).toBeEnabled()
+  await app.getByLabel('変更後のテキスト').fill('280,000')
+  const resumedEvent=page.waitForEvent('download')
+  await app.getByRole('button',{name:'PDFを保存',exact:true}).click()
+  await (await resumedEvent).saveAs(info.outputPath('offline-resumed.pdf'))
+  await expect(text('341,000')).toBeAttached()
   expect(errors).toEqual([])
   expect(network).toEqual([])
 })
