@@ -22,6 +22,7 @@ import { localNudge } from './pdf/coordinates'
 import { DocumentSearch, type BatchReport } from './components/DocumentSearch'
 import { replaceLiteral, type SearchHit, type SearchOptions } from './pdf/search'
 import { extractPages } from './pdf/page-ranges'
+import { makeInvoice, readInvoiceLink } from './pdf/invoice'
 
 type SourceDocument={bytes:Uint8Array;name:string}
 type Snapshot = { edits: Edits; calculation: CalculationRule | null; document:SourceDocument|null }
@@ -89,6 +90,7 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null)
   const workspace = useRef<HTMLDivElement>(null)
   const loadVersion = useRef(0)
+  const invoiceStarted=useRef(false)
   const busy = loading || building || validating || fontLoading
   const saved = selected ? edits[selected.id] : undefined
   const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? originalColor(selected)) || draft.align !== (saved?.align ?? originalAlign(selected)) || draft.autoFit !== (saved?.autoFit ?? true) || draft.family !== (saved?.family ?? 'auto') || draft.bold !== (saved?.bold ?? selected.appearance?.bold ?? false) || draft.offsetX !== (saved?.offsetX ?? 0) || draft.offsetY !== (saved?.offsetY ?? 0) || draft.customFontId !== (saved?saved.customFontId:selected.customFontId) || draft.widthPercent !== (saved?.widthPercent??100) || draft.lineHeight !== (saved?.lineHeight??1.2))
@@ -97,6 +99,21 @@ export default function App() {
   const restriction = selected && model ? editRestriction(selected, model) || (calculatedTarget
     ? 'この合計欄は自動計算で更新します。明細金額を変更してください。' : undefined) : undefined
   const reportError = useCallback((message: string) => setError(message), [])
+
+  useEffect(()=>{
+    if(invoiceStarted.current||!window.location.hash.startsWith('#invoice='))return
+    invoiceStarted.current=true
+    const hash=window.location.hash
+    window.history.replaceState(null,'',window.location.pathname+window.location.search)
+    setLoading(true)
+    void(async()=>{
+      try{
+        const data=readInvoiceLink(hash),[regular,bold]=await Promise.all([loadJapaneseFont(),loadJapaneseFont(true)])
+        const bytes=await makeInvoice(data,regular,bold)
+        if(await openBytes(bytes,`請求書_${data.date.replace(/-/g,'')}.pdf`))setNotice('請求書を作成しました。内容を確認し、右上の「PDFを保存」でダウンロードしてください。')
+      }catch(error){setError(messageOf(error));setLoading(false)}
+    })()
+  },[])
 
   useEffect(() => {
     if (!selected) { setDraft(null); return }
@@ -553,7 +570,7 @@ export default function App() {
       </aside>
     </main>
 
-    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.4.1</span></footer>
+    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.4.2</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
     {showSearch&&session&&<DocumentSearch session={session} edits={edits} busy={busy} onClose={()=>setShowSearch(false)} onJump={jumpToHit} onReplace={batchReplace}/>}
     {showPages&&session&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="pages-title"><div className="help-heading"><h2 id="pages-title">ページの抜き出し・移動</h2><button type="button" className="icon-button" aria-label="ページ操作を閉じる" disabled={busy} onClick={()=>setShowPages(false)}><X size={20}/></button></div><p>適用済みの編集を含めて、指定したページを別のPDFへ保存します。順序の変更や同じページの複数指定もできます。</p><label className="field-label" htmlFor="page-range">保存するページ（例：1,3-5）</label><input id="page-range" value={pageRange} disabled={busy} onChange={e=>setPageRange(e.target.value)}/><p>全{session.pdf.numPages}ページ。「3-1」は逆順、「1,1」は複製です。元のPDFのページは削除しません。しおり・フォーム操作や文書全体の設定は引き継ぎません。</p>{pagesError&&<p role="alert" className="batch-error">{pagesError}</p>}<button type="button" className="button primary" disabled={busy||!pageRange} onClick={()=>void exportRange()}>指定ページをPDFで保存</button><hr/><h3>現在の{pageIndex+1}ページを移動</h3><label className="field-label" htmlFor="page-move-to">移動先のページ番号</label><input id="page-move-to" type="number" min="1" max={session.pdf.numPages} step="1" value={moveTo} disabled={busy} onChange={e=>setMoveTo(Number(e.target.value))}/><button type="button" className="button secondary" disabled={busy||!Number.isInteger(moveTo)||moveTo<1||moveTo>session.pdf.numPages||moveTo===pageIndex+1} onClick={()=>{setShowPages(false);void changeDocument({type:'page-move',index:pageIndex,to:moveTo-1})}}>指定位置へ移動</button></section></div>}
