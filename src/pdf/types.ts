@@ -2,6 +2,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type { OriginalAppearance } from './appearance'
 import type { CalculationRule } from './calculation'
 import type { HiddenText } from './hidden-text'
+import type { FontAssets } from './custom-fonts'
 
 export type Rect = { x: number; y: number; width: number; height: number }
 export type TextRegion = {
@@ -22,6 +23,7 @@ export type TextRegion = {
   backgroundKind?: 'solid' | 'patch'
   unsupportedReason?: string
   appearance?: OriginalAppearance
+  customFontId?:string
 }
 export type Replacement = {
   region: TextRegion
@@ -34,6 +36,9 @@ export type Replacement = {
   offsetY?: number
   family?: 'auto' | 'sans' | 'serif' | 'mono'
   bold?: boolean
+  customFontId?:string
+  widthPercent?:number
+  lineHeight?:number
 }
 export type Edits = Record<string, Replacement>
 export type PageModel = {
@@ -44,6 +49,7 @@ export type PageModel = {
   pixels: ImageData
   pixelScale: number
   supportsBackground?: boolean
+  viewTransform?:number[]
 }
 export type DocumentSession = {
   name: string
@@ -54,5 +60,6 @@ export type DocumentSession = {
   sampleEstimate: boolean
   signed?: boolean
   hiddenText?:HiddenText[]
+  fonts?:FontAssets
   restored?: { edits: Edits; calculation: CalculationRule | null }
 }

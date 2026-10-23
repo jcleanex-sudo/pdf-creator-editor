@@ -10,6 +10,7 @@ import { pixelBounds } from './bounds'
 import { uniformBackground } from './background'
 import { MAX_FILE_SIZE, MAX_PAGES, MIN_FONT_SIZE } from './limits'
 import { readHiddenText, visibleTextRegions } from './hidden-text'
+import { readFontAssets, type FontAssets } from './custom-fonts'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import type { DocumentSession, Edits, PageModel, Rect, TextRegion } from './types'
 import { EmbeddedBinaryDataFactory, portableAssets } from './portable'
@@ -37,6 +38,7 @@ export async function openPdf(bytes: Uint8Array, name: string, restore = true): 
   let sampleEstimate = false
   let stored: ReturnType<typeof readProject> = null
   let hiddenText:ReturnType<typeof readHiddenText>=[]
+  let fonts:FontAssets={}
   try {
     const parsed = await PDFDocument.load(bytes)
     const template = parsed.catalog.get(PDFName.of('PDFEditorTemplate'))
@@ -46,6 +48,7 @@ export async function openPdf(bytes: Uint8Array, name: string, restore = true): 
     hasSignature = parsed.getForm().getFields().some(field => field instanceof PDFSignature)
     if (restore) stored = readProject(parsed)
     hiddenText=readHiddenText(parsed)
+    fonts=readFontAssets(parsed)
   }
   catch (error) {
     if (String(error).toLowerCase().includes('encrypt')) throw new EncryptedPdfError('パスワード付きPDFです。')
@@ -54,6 +57,7 @@ export async function openPdf(bytes: Uint8Array, name: string, restore = true): 
   if (pageCount > MAX_PAGES) throw new Error('この環境では2,000ページまでのPDFに対応しています。')
   if (stored) {
     const session = await openPdf(stored.source, name, false)
+    session.fonts={...session.fonts,...fonts}
     try {
       if (session.pdf.numPages !== pageCount) throw new Error('ページ数が一致しません。')
       const ids = new Set(stored.project.edits.map(edit => edit.id))
@@ -71,6 +75,7 @@ export async function openPdf(bytes: Uint8Array, name: string, restore = true): 
       }
       if (regions.size !== ids.size) throw new Error('対象の文字が見つかりません。')
       const edits: Edits = Object.fromEntries(stored.project.edits.map(({ id, ...edit }) => [id, { ...edit, region: regions.get(id)! }]))
+      if(Object.values(edits).some(edit=>edit.customFontId&&!session.fonts?.[edit.customFontId]))throw new Error('使用したフォントが見つかりません。')
       for (const edit of Object.values(edits)) await prepareEditBackground(session, edit.region)
       const rule = stored.project.calculation
       const calculation: CalculationRule | null = rule ? { sources: rule.sources.map(id => regions.get(id)!), target: regions.get(rule.target)!, taxPercent: rule.taxPercent } : null
@@ -89,7 +94,7 @@ export async function openPdf(bytes: Uint8Array, name: string, restore = true): 
   const task = readPdf(bytes)
   try {
     const pdf = await task.promise
-    return { bytes, pdf, name, size: bytes.length, pageCache: new Map(), sampleEstimate, signed:hasSignature,hiddenText }
+    return { bytes, pdf, name, size: bytes.length, pageCache: new Map(), sampleEstimate, signed:hasSignature,hiddenText,fonts }
   } catch {
     await task.destroy()
     throw new Error('このPDFを表示できません。別のPDFをお試しください。')
@@ -172,11 +177,12 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
       unsupportedReason = '文字領域が小さすぎるか、ページの外側にあります。'
     const font = page.commonObjs.has(item.fontName) ? page.commonObjs.get(item.fontName) : undefined
     const appearance = fontAppearance(String(font?.name ?? ''), !!(font?.bold || font?.black), !!font?.italic)
+    const customFontId=Object.entries(session.fonts??{}).find(([,value])=>value.postscriptName===appearance.fontName)?.[0]
     const paint = paints.next(item.str, item.fontName)
     appearance.color = paint.color
     if (paint.warning) appearance.warning = [appearance.warning, paint.warning].filter(Boolean).join(' ')
     unsupportedReason ??= paint.unsafe
-    regions.push({ id: `${pageIndex}:${index}`, pageIndex, text: item.str, x, baseline: y, width: item.width, fontSize, rect, screen, unsupportedReason, appearance,
+    regions.push({ id: `${pageIndex}:${index}`, pageIndex, text: item.str, x, baseline: y, width: item.width, fontSize, rect, screen, unsupportedReason, appearance,customFontId,
       ...(rotated?{layout:{x:0,baseline:0,width:item.width,rect:localRect},transform:[cos,sin,-sin,cos,x,y] as [number,number,number,number,number,number]}:{}) })
   }
   if (unreliableBackground) for (const region of regions)
@@ -205,7 +211,7 @@ async function analyzePage(session: DocumentSession, pageIndex: number): Promise
   // Extra metadata is needed for font identification, not for retaining a
   // second copy of every font program after the browser has loaded it.
   for (const name of Object.keys(content.styles)) if (page.commonObjs.has(name)) page.commonObjs.get(name)?.clearData?.()
-  return { width: viewport.width, height: viewport.height, regions:visibleTextRegions(regions,session.hiddenText??[]), pixels, pixelScale, supportsBackground:!unreliableBackground }
+  return { width: viewport.width, height: viewport.height, regions:visibleTextRegions(regions,session.hiddenText??[]), pixels, pixelScale, supportsBackground:!unreliableBackground,viewTransform:viewport.transform }
 }
 
 export async function prepareEditBackground(session:DocumentSession,region:TextRegion) {

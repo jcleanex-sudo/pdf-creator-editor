@@ -10,10 +10,11 @@ const project = { version: 1, edits: [edit], calculation: null }
 describe('editable PDF project data', () => {
   it('validates stored text and calculation bindings without trusting stored geometry or fonts', () => {
     expect(parseProject(encode(project))).toEqual(project)
+    expect(parseProject(encode({...project,version:2,edits:[{...edit,customFontId:'font-1',widthPercent:82.5,lineHeight:1.7}]})).edits[0]).toMatchObject({customFontId:'font-1',widthPercent:82.5,lineHeight:1.7})
     const rule = { sources: ['0:1', '0:2'], target: '0:3', taxPercent: 10 }
     expect(parseProject(encode({ ...project, calculation: rule })).calculation).toEqual(rule)
     for (const invalid of [
-      { ...project, version: 2 },
+      { ...project, version: 3 },
       { ...project, edits: [edit, edit] },
       { ...project, edits: [{ ...edit, id: '__proto__' }] },
       { ...project, edits: [{ ...edit, id: '2000:0' }] },
@@ -22,6 +23,9 @@ describe('editable PDF project data', () => {
       { ...project, edits: [{ ...edit, fontSize: 0 }] },
       { ...project, edits: [{ ...edit, color: 'red' }] },
       { ...project, edits: [{ ...edit, align: 'invalid' }] },
+      { ...project, edits: [{ ...edit, widthPercent:0 }] },
+      { ...project, edits: [{ ...edit, lineHeight:6 }] },
+      { ...project, edits: [{ ...edit, customFontId:'__proto__' }] },
       { ...project, calculation: { ...rule, sources: ['0:3'] } },
       { ...project, calculation: { ...rule, sources: ['1:1'] } },
       { ...project, calculation: { ...rule, taxPercent: 10.001 } },
@@ -37,7 +41,7 @@ describe('editable PDF project data', () => {
     storeProject(output, original, edits, null)
     const result = readProject(await PDFDocument.load(await output.save()))!
     expect(result.source).toEqual(original)
-    expect(result.project).toEqual(project)
+    expect(result.project).toEqual({...project,version:2})
     expect(readProject(source)).toBeNull()
   })
 

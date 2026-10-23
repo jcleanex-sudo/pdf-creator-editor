@@ -5,7 +5,7 @@ import { MAX_FILE_SIZE, MAX_PAGES, MAX_TEXT_LENGTH, MIN_FONT_SIZE, MAX_FONT_SIZE
 
 type StoredEdit = Omit<Replacement,'region'> & {id:string}
 export type StoredProject = {
-  version: 1
+  version: 1 | 2
   edits: StoredEdit[]
   calculation: { sources: string[]; target: string; taxPercent: number } | null
 }
@@ -19,7 +19,7 @@ const record = (value: unknown): value is Record<string, unknown> => !!value && 
 export function parseProject(bytes: Uint8Array): StoredProject {
   if (bytes.length > MAX_PROJECT_BYTES) throw new Error('編集データが大きすぎます。')
   const value: unknown = JSON.parse(new TextDecoder().decode(bytes))
-  if (!record(value) || value.version !== 1 || !Array.isArray(value.edits) || value.edits.length > 100_000)
+  if (!record(value) || ![1,2].includes(Number(value.version)) || typeof value.version!=='number' || !Array.isArray(value.edits) || value.edits.length > 100_000)
     throw new Error('編集データの形式が正しくありません。')
   const ids = new Set<string>()
   for (const edit of value.edits) {
@@ -31,6 +31,10 @@ export function parseProject(bytes: Uint8Array): StoredProject {
       edit.family!==undefined&&!['auto','sans','serif','mono'].includes(String(edit.family))||
       [edit.offsetX,edit.offsetY].some(value=>value!==undefined&&(typeof value!=='number'||!Number.isFinite(value)||Math.abs(value)>100_000)))
       throw new Error('編集データの位置や書体が正しくありません。')
+    if(edit.customFontId!==undefined&&(typeof edit.customFontId!=='string'||!/^font-[1-9]\d{0,3}$/.test(edit.customFontId))||
+      edit.widthPercent!==undefined&&(typeof edit.widthPercent!=='number'||!Number.isFinite(edit.widthPercent)||edit.widthPercent<10||edit.widthPercent>500)||
+      edit.lineHeight!==undefined&&(typeof edit.lineHeight!=='number'||!Number.isFinite(edit.lineHeight)||edit.lineHeight<0.5||edit.lineHeight>5))
+      throw new Error('編集データの字幅・行間・フォントが正しくありません。')
     ids.add(edit.id)
   }
   const rule = value.calculation
@@ -43,7 +47,7 @@ export function parseProject(bytes: Uint8Array): StoredProject {
 }
 
 export function storeProject(pdf: PDFDocument, original: Uint8Array, edits: Edits, calculation: CalculationRule | null) {
-  const project: StoredProject = { version: 1,
+  const project: StoredProject = { version: 2,
     edits: Object.values(edits).map(({ region, ...edit }) => ({ id: region.id, ...edit })),
     calculation: calculation ? { sources: calculation.sources.map(source => source.id), target: calculation.target.id, taxPercent: calculation.taxPercent } : null,
   }

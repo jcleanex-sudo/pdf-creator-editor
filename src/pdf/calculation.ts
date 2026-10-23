@@ -38,7 +38,7 @@ export function calculateTotal(rule: CalculationRule, edits: Edits) {
 export function recalculate(edits: Edits, rule: CalculationRule): Edits {
   const { total } = calculateTotal(rule, edits)
   const previous: Replacement = edits[rule.target.id] ?? {
-    region: rule.target, text: rule.target.text, fontSize: rule.target.fontSize, color: originalColor(rule.target), align: 'right',
+    region: rule.target, text: rule.target.text, fontSize: rule.target.fontSize, color: originalColor(rule.target), align: 'right', customFontId:rule.target.customFontId,
   }
   return { ...edits, [rule.target.id]: { ...previous, text: formatAmount(total) } }
 }

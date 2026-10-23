@@ -7,6 +7,8 @@ import { decodeBase64, portableAssets } from './portable'
 import { glyphMetrics, registerGlyphMetrics } from './glyph-metrics'
 import { MAX_TEXT_LENGTH, MIN_FONT_SIZE, MAX_FONT_SIZE } from './limits'
 import { readHiddenText, storeHiddenText, describeHiddenText } from './hidden-text'
+import { readFontAssets, storeFontAssets, inspectFont, type FontAssets } from './custom-fonts'
+import { MAX_FILE_SIZE } from './limits'
 
 const fontPromises = new Map<string, Promise<Uint8Array>>()
 export function loadJapaneseFont(bold = false, serif = false) {
@@ -39,7 +41,7 @@ function fontChoice(edit:Replacement) {
   const serif=family==='serif'||family==='auto'&&/mincho|ming|myungjo|serif|times/i.test(appearance?.fontName??'')
   return {standard,bold,serif}
 }
-export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, subset = false) {
+export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, subset = false, assets:FontAssets=readFontAssets(pdf)) {
   pdf.registerFontkit(fontkit)
   const fonts = new Map<string, Promise<PDFFont>>()
   const embed = (key: string, loader: () => Promise<PDFFont>) => {
@@ -47,6 +49,14 @@ export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, s
     return fonts.get(key)!
   }
   return async (edit: Replacement) => {
+    if(edit.customFontId){
+      const asset=assets[edit.customFontId]
+      if(!asset)throw new Error('使用するフォントが見つかりません。フォントファイルをもう一度選択してください。')
+      return embed(edit.customFontId,async()=>{
+        inspectFont(asset.bytes)
+        return registerGlyphMetrics(await pdf.embedFont(asset.bytes,{subset}),asset.bytes)
+      })
+    }
     const {standard,bold,serif}=fontChoice(edit)
     if (standard && Object.values(StandardFonts).includes(standard)) {
       const font = await embed(standard, () => pdf.embedFont(standard))
@@ -60,13 +70,15 @@ export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, s
 }
 
 const latinEncoding = StandardFontEmbedder.for('Helvetica' as Parameters<typeof StandardFontEmbedder.for>[0]).encoding
-export function replacementFontLabel(edit: Replacement) {
+export function replacementFontLabel(edit: Replacement,assets:FontAssets={}) {
+  if(edit.customFontId)return assets[edit.customFontId]?.name??'読み込んだフォント'
   const {standard,bold,serif}=fontChoice(edit)
   if (standard && [...edit.text].filter(c=>c!=='\n'&&c!=='\r').every(character => latinEncoding.canEncodeUnicodeCodePoint(character.codePointAt(0)!))) return standard
   return `Noto ${serif?'Serif':'Sans'} JP ${bold?'Bold':'Regular'}`
 }
 
 export function replacementFontWarning(edit: Replacement) {
+  if(edit.customFontId)return ''
   const label = replacementFontLabel(edit), appearance = edit.region.appearance
   const fallback = label.startsWith('Noto ')
   return [appearance?.warning,
@@ -76,6 +88,8 @@ export function replacementFontWarning(edit: Replacement) {
 }
 
 export function fitText(font: PDFFont, edit: Replacement) {
+  const widthScale=(edit.widthPercent??100)/100,lineHeight=edit.lineHeight??1.2
+  if(!Number.isFinite(widthScale)||widthScale<0.1||widthScale>5||!Number.isFinite(lineHeight)||lineHeight<0.5||lineHeight>5)throw new Error('字幅は10〜500%、行間は0.5〜5倍で指定してください。')
   if([edit.offsetX,edit.offsetY].some(value=>value!==undefined&&(!Number.isFinite(value)||Math.abs(value)>100_000)))throw new Error('位置を正しく指定してください。')
   const {text}=edit
   const region=edit.region.layout?{...edit.region,...edit.region.layout}:edit.region
@@ -89,10 +103,10 @@ export function fitText(font: PDFFont, edit: Replacement) {
   // Keep both the width and the glyph ascent/descent inside the original region.
   const measurements=lines.map(line=>glyphMetrics(font,line))
   const hasMetrics=measurements.every(value=>!!value)
-  const ink=hasMetrics?{left:Math.min(...measurements.map(v=>v!.left)),right:Math.max(...measurements.map(v=>v!.right)),ascent:Math.max(...measurements.map(v=>v!.ascent)),descent:Math.max(...measurements.map(v=>v!.descent))+1.2*(lines.length-1)}:undefined
+  const ink=hasMetrics?{left:Math.min(...measurements.map(v=>v!.left)),right:Math.max(...measurements.map(v=>v!.right)),ascent:Math.max(...measurements.map(v=>v!.ascent)),descent:Math.max(...measurements.map(v=>v!.descent))+lineHeight*(lines.length-1)}:undefined
   const ascent = ink?.ascent ?? font.heightAtSize(1, { descender: false })
   const fullHeight = font.heightAtSize(1, { descender: true })
-  const descent = ink?.descent ?? Math.max(0, fullHeight - ascent)+1.2*(lines.length-1)
+  const descent = ink?.descent ?? Math.max(0, fullHeight - ascent)+lineHeight*(lines.length-1)
   const topSpace = region.rect.y + region.rect.height - region.baseline - 0.35
   const bottomSpace = region.baseline - region.rect.y - 0.35
   const flexible=region.tightBounds||lines.length>1
@@ -104,7 +118,7 @@ export function fitText(font: PDFFont, edit: Replacement) {
   const naturalWidth = text ? measure(size) : 0
   // Preserve the original point size when possible. Modest horizontal fitting
   // avoids making a same-length numeric replacement noticeably shorter.
-  let scaleX = edit.autoFit===false?1:naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
+  let scaleX = widthScale*(edit.autoFit===false?1:naturalWidth*widthScale > region.width ? Math.max(0.8, region.width / (naturalWidth*widthScale)) : 1)
   if (edit.autoFit!==false && naturalWidth * scaleX > region.width) size *= region.width / (naturalWidth * scaleX)
   if (edit.autoFit!==false && region.tightBounds) {
     const inkWidth = ink ? (ink.right-ink.left) * size : (text ? measure(size) : 0)
@@ -122,16 +136,17 @@ export function fitText(font: PDFFont, edit: Replacement) {
   if (!Number.isFinite(scaleX) || scaleX <= 0) throw new Error('元の領域に収まりません。別の領域を選んでください。')
   const baseline = edit.autoFit!==false && flexible ? Math.max(region.rect.y + 0.35 + descent * size,
     Math.min(region.baseline, region.rect.y + region.rect.height - 0.35 - ascent * size)) : region.baseline
-  return { size, x:x+(edit.offsetX??0), baseline:baseline+(edit.offsetY??0), width: fittedWidth, scaleX, lines }
+  return { size, x:x+(edit.offsetX??0), baseline:baseline+(edit.offsetY??0), width: fittedWidth, scaleX, lines, lineHeight:size*lineHeight }
 }
 
-export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array, calculation: CalculationRule | null = null): Promise<Uint8Array> {
+export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array, calculation: CalculationRule | null = null, assets:FontAssets={}): Promise<Uint8Array> {
   const entries = Object.values(edits)
   if (!entries.length) return original.slice()
   const pdf = await PDFDocument.load(original)
   // Full embedding avoids reproducible missing glyphs in fontkit's Japanese subsetting.
   // The extra file size is intentional until a verified subset pipeline is available.
-  const resolveFont = createFontResolver(pdf, fontBytes)
+  const baseFonts=readFontAssets(pdf),fonts={...baseFonts,...assets}
+  const resolveFont = createFontResolver(pdf, fontBytes,false,fonts)
   const pages = pdf.getPages()
   // Compute every placement before changing the document: failed edits never produce partial output.
   const placements = await Promise.all(entries.map(async edit => {
@@ -157,13 +172,17 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
       page.pushOperators(pushGraphicsState())
       if(edit.region.transform)page.pushOperators(concatTransformationMatrix(...edit.region.transform))
       page.pushOperators(concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, fit.baseline))
-      page.drawText(fit.lines.join('\n'), { x: 0, y: 0, size: fit.size, lineHeight:fit.size*1.2, font, color: rgb(parts[0], parts[1], parts[2]) })
+      page.drawText(fit.lines.join('\n'), { x: 0, y: 0, size: fit.size, lineHeight:fit.lineHeight, font, color: rgb(parts[0], parts[1], parts[2]) })
       page.pushOperators(popGraphicsState())
     }
   }
   storeHiddenText(pdf,[...readHiddenText(pdf),...entries.map(edit=>describeHiddenText(edit.region))])
+  const keep=new Set([...Object.keys(baseFonts),...entries.flatMap(edit=>edit.customFontId?[edit.customFontId]:[])])
+  storeFontAssets(pdf,Object.fromEntries(Object.entries(fonts).filter(([id])=>keep.has(id))))
   storeProject(pdf, original, edits, calculation)
-  return pdf.save()
+  const bytes=await pdf.save()
+  if(bytes.length>MAX_FILE_SIZE)throw new Error('保存するPDFが100 MBを超えます。使用するフォントや画像を減らしてください。')
+  return bytes
 }
 
 export async function makeSample(fontBytes: Uint8Array) {

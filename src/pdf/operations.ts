@@ -3,6 +3,7 @@ import { createFontResolver, loadJapaneseFont } from './output'
 import type { DocumentSession, Rect, TextRegion, Replacement } from './types'
 import { MAX_FILE_SIZE, MAX_PAGES, MAX_TEXT_LENGTH } from './limits'
 import { readHiddenText, storeHiddenText, type HiddenText } from './hidden-text'
+import { readFontAssets, storeFontAssets, addFont, type FontAssets } from './custom-fonts'
 
 export type Placement = { rect: Rect; matrix: [number,number,number,number,number,number]; coverRect: Rect }
 export type DocumentOperation =
@@ -11,7 +12,7 @@ export type DocumentOperation =
   | { type:'page-rotate'; index:number }
   | { type:'page-move'; index:number; to:number }
   | { type:'merge'; bytes:Uint8Array }
-  | { type:'text'; index:number; placement:Placement; text:string; size:number; color:string; family:Replacement['family']; bold:boolean; cover?:string; autoFit?:boolean; hidden?:HiddenText[] }
+  | { type:'text'; index:number; placement:Placement; text:string; size:number; color:string; family:Replacement['family']; bold:boolean; cover?:string; autoFit?:boolean; hidden?:HiddenText[]; customFontId?:string; widthPercent?:number; lineHeight?:number }
   | { type:'image'; index:number; placement:Placement; bytes:Uint8Array; format:'png'|'jpg' }
   | { type:'shape'; index:number; placement:Placement; shape:'rectangle'|'line'|'highlight'|'cover'; color:string }
 
@@ -31,9 +32,10 @@ export async function placementAt(session:DocumentSession,index:number,rect:Rect
   return {rect,matrix:[right[0]-base[0],right[1]-base[1],up[0]-base[0],up[1]-base[1],...base] as Placement['matrix'],coverRect:{x:Math.min(...xs),y:Math.min(...ys),width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}}
 }
 
-export async function operateDocument(bytes:Uint8Array,operation:DocumentOperation){
+export async function operateDocument(bytes:Uint8Array,operation:DocumentOperation,assets:FontAssets={}){
   const pdf=await PDFDocument.load(bytes),count=pdf.getPageCount()
   let hidden=readHiddenText(pdf)
+  let fonts={...readFontAssets(pdf),...assets},notice:string|undefined
   // These edits become the new base document; they must not restore a stale
   // project catalog from a file previously saved by another editing session.
   for(const key of ['PDFEditorSourceV1','PDFEditorProjectV1'])pdf.catalog.delete(PDFName.of(key))
@@ -57,6 +59,10 @@ export async function operateDocument(bytes:Uint8Array,operation:DocumentOperati
     const page=pdf.getPage(operation.index);page.setRotation(degrees((page.getRotation().angle+90)%360))
   }else if(operation.type==='merge'){
     const other=await PDFDocument.load(operation.bytes)
+    for(const asset of Object.values(readFontAssets(other))){
+      try{fonts=addFont(fonts,asset).assets}
+      catch{notice='ページを結合しました。書体保存の容量上限により、一部の書体は編集時に別途フォントファイルを選択してください。表示は保持しています。'}
+    }
     hidden.push(...readHiddenText(other).map(value=>({...value,pageIndex:value.pageIndex+count})))
     if(count+other.getPageCount()>MAX_PAGES)throw new Error('結合後のページ数が多すぎます。')
     for(const page of await pdf.copyPages(other,other.getPageIndices()))pdf.addPage(page)
@@ -75,25 +81,29 @@ export async function operateDocument(bytes:Uint8Array,operation:DocumentOperati
       else page.drawRectangle({x:0,y:0,width:rect.width,height:rect.height,...(operation.shape==='rectangle'?{borderColor:color(operation.color),borderWidth:1.5}:{color:color(operation.color),borderWidth:0,opacity:operation.shape==='highlight'?0.3:1})})
     }else{
       if(operation.text.length>MAX_TEXT_LENGTH||/[\u0000-\u0009\u000b-\u000c\u000e-\u001f\u007f]/.test(operation.text)||!Number.isFinite(operation.size)||operation.size<1||operation.size>720)throw new Error('文字やサイズを正しく指定してください。')
-      const resolve=createFontResolver(pdf,await loadJapaneseFont())
-      const font=await resolve({text:operation.text,fontSize:operation.size,color:operation.color,align:'left',family:operation.family,bold:operation.bold,region:{appearance:{fontName:'Noto Sans JP',bold:operation.bold,italic:false}} as TextRegion})
+      const widthScale=(operation.widthPercent??100)/100,lineHeight=operation.lineHeight??1.2
+      if(!Number.isFinite(widthScale)||widthScale<0.1||widthScale>5||!Number.isFinite(lineHeight)||lineHeight<0.5||lineHeight>5)throw new Error('字幅・行間を正しく指定してください。')
+      const resolve=createFontResolver(pdf,await loadJapaneseFont(),false,fonts)
+      const font=await resolve({text:operation.text,fontSize:operation.size,color:operation.color,align:'left',family:operation.family,bold:operation.bold,customFontId:operation.customFontId,region:{appearance:{fontName:'Noto Sans JP',bold:operation.bold,italic:false}} as TextRegion})
       const supported=new Set(font.getCharacterSet())
       if([...operation.text].some(c=>c!=='\n'&&c!=='\r'&&!supported.has(c.codePointAt(0)!)))throw new Error('選んだ書体で表示できない文字があります。')
       const lines:string[]=[]
       for(const paragraph of operation.text.replace(/\r\n/g,'\n').split('\n')){
         let line=''
-        for(const character of paragraph){if(operation.autoFit!==false&&line&&font.widthOfTextAtSize(line+character,operation.size)>rect.width){lines.push(line);line=''}line+=character}
+        for(const character of paragraph){if(operation.autoFit!==false&&line&&font.widthOfTextAtSize(line+character,operation.size)*widthScale>rect.width){lines.push(line);line=''}line+=character}
         lines.push(line)
       }
-      const size=operation.autoFit===false?operation.size:Math.min(operation.size,rect.height/Math.max(1,lines.length*1.2),rect.width/Math.max(1,...lines.map(line=>font.widthOfTextAtSize(line,1))))
+      const size=operation.autoFit===false?operation.size:Math.min(operation.size,rect.height/Math.max(1,lines.length*lineHeight),rect.width/Math.max(1,...lines.map(line=>font.widthOfTextAtSize(line,1)*widthScale)))
       if(size<1)throw new Error('文字が多すぎます。範囲を広げてください。')
-      page.drawText(lines.join('\n'),{x:0,y:rect.height-size,size,lineHeight:size*1.2,font,color:color(operation.color)})
+      page.pushOperators(concatTransformationMatrix(widthScale,0,0,1,0,0))
+      page.drawText(lines.join('\n'),{x:0,y:rect.height-size,size,lineHeight:size*lineHeight,font,color:color(operation.color)})
     }
     page.pushOperators(popGraphicsState())
   }
   if(operation.type.startsWith('page-'))hidden=hidden.flatMap(value=>{const index=pageMap.get(value.pageIndex);return index===undefined?[]:[{...value,pageIndex:index}]})
   storeHiddenText(pdf,hidden)
+  storeFontAssets(pdf,fonts)
   const result=await pdf.save()
   if(result.length>MAX_FILE_SIZE)throw new Error('編集後のPDFが100 MBを超えます。画像を小さくしてください。')
-  return {bytes:result,pageMap,active}
+  return {bytes:result,pageMap,active,notice}
 }

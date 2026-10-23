@@ -14,6 +14,11 @@ import { describeHiddenText } from './pdf/hidden-text'
 import { unlockVisualCopy } from './pdf/unlock'
 import { InsertionPanel, type ToolMode, type Insertion } from './components/InsertionPanel'
 import { blankDocument, operateDocument, placementAt, type DocumentOperation } from './pdf/operations'
+import { addFont, inspectFont, MAX_FONT_BYTES, type FontAssets } from './pdf/custom-fonts'
+import { FontPicker } from './components/FontPicker'
+import { RegionPreview } from './components/RegionPreview'
+import { TypographyControls } from './components/TypographyControls'
+import { localNudge } from './pdf/coordinates'
 
 type SourceDocument={bytes:Uint8Array;name:string}
 type Snapshot = { edits: Edits; calculation: CalculationRule | null; document:SourceDocument|null }
@@ -45,11 +50,16 @@ export default function App() {
   const [passwordFile,setPasswordFile]=useState<{bytes:Uint8Array;name:string}|null>(null)
   const [password,setPassword]=useState('')
   const [passwordError,setPasswordError]=useState('')
+  const [recoveryFile,setRecoveryFile]=useState<{bytes:Uint8Array;name:string}|null>(null)
   const [toolMode,setToolMode]=useState<ToolMode>('select')
   const [areaText,setAreaText]=useState('')
   const [area,setArea]=useState({x:40,y:80,width:240,height:60})
   const mergeInput=useRef<HTMLInputElement>(null)
   const [session, setSession] = useState<DocumentSession | null>(null)
+  const [fonts,setFonts]=useState<FontAssets>({})
+  const [fontLoading,setFontLoading]=useState(false)
+  const [textFilter,setTextFilter]=useState('')
+  const [microStep,setMicroStep]=useState(0.1)
   const [history, dispatch] = useReducer(historyReducer, emptyHistory)
   const { edits, calculation } = history.present
   const [pageIndex, setPageIndex] = useState(0)
@@ -71,9 +81,9 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null)
   const workspace = useRef<HTMLDivElement>(null)
   const loadVersion = useRef(0)
-  const busy = loading || building || validating
+  const busy = loading || building || validating || fontLoading
   const saved = selected ? edits[selected.id] : undefined
-  const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? originalColor(selected)) || draft.align !== (saved?.align ?? originalAlign(selected)) || draft.autoFit !== (saved?.autoFit ?? true) || draft.family !== (saved?.family ?? 'auto') || draft.bold !== (saved?.bold ?? selected.appearance?.bold ?? false) || draft.offsetX !== (saved?.offsetX ?? 0) || draft.offsetY !== (saved?.offsetY ?? 0))
+  const dirty = !!draft && !!selected && (draft.text !== (saved?.text ?? selected.text) || draft.fontSize !== (saved?.fontSize ?? selected.fontSize) || draft.color !== (saved?.color ?? originalColor(selected)) || draft.align !== (saved?.align ?? originalAlign(selected)) || draft.autoFit !== (saved?.autoFit ?? true) || draft.family !== (saved?.family ?? 'auto') || draft.bold !== (saved?.bold ?? selected.appearance?.bold ?? false) || draft.offsetX !== (saved?.offsetX ?? 0) || draft.offsetY !== (saved?.offsetY ?? 0) || draft.customFontId !== (saved?saved.customFontId:selected.customFontId) || draft.widthPercent !== (saved?.widthPercent??100) || draft.lineHeight !== (saved?.lineHeight??1.2))
   const editCount = Object.keys(edits).length
   const calculatedTarget = calculation?.target.id === selected?.id && !!calculation
   const restriction = selected && model ? editRestriction(selected, model) || (calculatedTarget
@@ -82,7 +92,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selected) { setDraft(null); return }
-    setDraft({ text: saved?.text ?? selected.text, fontSize: saved?.fontSize ?? selected.fontSize, color: saved?.color ?? originalColor(selected), align: saved?.align ?? originalAlign(selected), autoFit:saved?.autoFit??true, family:saved?.family??'auto', bold:saved?.bold??selected.appearance?.bold??false, offsetX:saved?.offsetX??0, offsetY:saved?.offsetY??0 })
+    setDraft({ text: saved?.text ?? selected.text, fontSize: saved?.fontSize ?? selected.fontSize, color: saved?.color ?? originalColor(selected), align: saved?.align ?? originalAlign(selected), autoFit:saved?.autoFit??true, family:saved?.family??'auto', bold:saved?.bold??selected.appearance?.bold??false, offsetX:saved?.offsetX??0, offsetY:saved?.offsetY??0,customFontId:saved?saved.customFontId:selected.customFontId,widthPercent:saved?.widthPercent??100,lineHeight:saved?.lineHeight??1.2 })
     setActualSize(null)
   }, [selected, saved])
 
@@ -107,7 +117,7 @@ export default function App() {
     }
     setBuilding(true)
     void (async () => {
-      const bytes = await writePdf(session.bytes, edits, await loadJapaneseFont(), calculation)
+      const bytes = await writePdf(session.bytes, edits, await loadJapaneseFont(), calculation,fonts)
       if (canceled) return
       task = readPdf(bytes)
       owned = await task.promise
@@ -118,7 +128,7 @@ export default function App() {
     // Keep the displayed worker alive while the next preview is being built.
     // Ownership moves to preview state only after it has been published.
     return () => { canceled = true; if (!transferred) { if (owned) void owned.loadingTask.destroy(); else if (task) void task.destroy() } }
-  }, [session,edits,calculation])
+  }, [session,edits,calculation,fonts])
 
   useEffect(() => () => { if (preview?.owned) void preview.pdf.loadingTask.destroy() }, [preview])
 
@@ -136,26 +146,67 @@ export default function App() {
   }, [editCount,dirty,history.past.length])
 
   const canLeaveDraft = () => !dirty || window.confirm('入力中の変更を破棄しますか？「変更を適用」でPDFに反映できます。')
-  const chooseRegion = (region: TextRegion) => { setToolMode('select'); if (selected?.id !== region.id && canLeaveDraft()) { setSelected(region); setNotice(''); setError('') } }
+  const chooseRegion = (region: TextRegion) => {
+    if(selected?.id!==region.id&&!canLeaveDraft())return false
+    setToolMode('select');setSelected(region);setNotice('');setError('');return true
+  }
+  const filterText=(value:string)=>value.normalize('NFKC').toLocaleLowerCase('ja-JP')
+  const matches=model?.regions.filter(region=>filterText(edits[region.id]?.text??region.text).includes(filterText(textFilter)))??[]
+  function changeZoom(value:number,focus?:TextRegion){
+    const stage=workspace.current,paper=stage?.querySelector('.pdf-paper'),box=stage?.getBoundingClientRect(),paperBox=paper?.getBoundingClientRect()
+    const target=focus??selected
+    const anchor=target?{x:target.screen.x+target.screen.width/2,y:target.screen.y+target.screen.height/2}:box&&paperBox?{x:(box.left+stage!.clientWidth/2-paperBox.left)/zoom,y:(box.top+stage!.clientHeight/2-paperBox.top)/zoom}:null
+    const next=Math.max(0.25,Math.min(8,value));setZoom(next)
+    if(stage&&anchor)requestAnimationFrame(()=>{const nextBox=stage.querySelector('.pdf-paper')?.getBoundingClientRect(),frame=stage.getBoundingClientRect();if(nextBox)stage.scrollBy({left:nextBox.left+anchor.x*next-frame.left-stage.clientWidth/2,top:nextBox.top+anchor.y*next-frame.top-stage.clientHeight/2})})
+  }
+  function chooseMatch(direction:number){
+    if(!matches.length||busy)return
+    const at=matches.findIndex(region=>region.id===selected?.id),index=at<0?(direction>0?0:matches.length-1):(at+direction+matches.length)%matches.length,region=matches[index]
+    if(chooseRegion(region))changeZoom(zoom,region)
+  }
+  function nudge(dx:number,dy:number,step=microStep){
+    if(busy||restriction||!draft)return
+    if(!Number.isFinite(step)||step<0.01||step>10){setError('移動の刻みは0.01〜10 ptで指定してください。');return}
+    try{
+      const local=localNudge(dx*step,-dy*step,model?.viewTransform,selected?.transform)
+      setDraft({...draft,offsetX:Number(((draft.offsetX??0)+local.x).toFixed(6)),offsetY:Number(((draft.offsetY??0)+local.y).toFixed(6))})
+    }catch(error){setError(messageOf(error))}
+  }
+  async function importFont(file:File){
+    if(busy||!session)return
+    setFontLoading(true);setError('')
+    try{
+      if(file.size>MAX_FONT_BYTES)throw new Error('フォントは20 MB以内で選択してください。')
+      const asset=inspectFont(new Uint8Array(await file.arrayBuffer()))
+      const test=await PDFDocument.create(),resolve=createFontResolver(test,await loadJapaneseFont(),true,{'font-1':asset})
+      await resolve({text:'',fontSize:12,color:'#000000',align:'left',customFontId:'font-1',region:{} as TextRegion})
+      const next=addFont(fonts,asset);setFonts(next.assets)
+      setNotice(`「${asset.name}」を読み込みました。適用・保存時にフォントもPDF内に保存します。`)
+      return next.id
+    }catch(error){setError(messageOf(error))}
+    finally{setFontLoading(false)}
+  }
   const changePage = (index: number) => {
     if (!session || index===pageIndex || index<0 || index>=session.pdf.numPages || !canLeaveDraft()) return
-    setSelected(null); setModel(null); setPageIndex(index); setError('')
+    setSelected(null); setModel(null); setPageIndex(index); setError('');setTextFilter('')
     workspace.current?.scrollTo({ top: 0, left: 0 })
   }
 
   async function openBytes(bytes: Uint8Array, name: string) {
     const version = ++loadVersion.current
-    setLoading(true); setError(''); setNotice('')
+    setLoading(true); setError(''); setNotice('');setRecoveryFile(null)
     try {
       const next = await openPdf(bytes,name)
       const firstPage = await loadPage(next,0).catch(async e => { await next.pdf.loadingTask.destroy(); throw e })
-      if (version !== loadVersion.current) { await next.pdf.loadingTask.destroy(); return }
+      if (version !== loadVersion.current) { await next.pdf.loadingTask.destroy(); return false }
       setPreview(null); setSelected(null); setModel(null); setToolMode('select')
+      setFonts(next.fonts??{});setTextFilter('')
       setSession(next); setPageIndex(0); dispatch({ type:'clear', document:{bytes:next.bytes,name:next.name}, edits: next.restored?.edits,
         calculation: next.restored ? next.restored.calculation : next.sampleEstimate ? sampleCalculation(firstPage) : null }); setDownloadRequested(false); setZoom(1)
       if(next.signed)setNotice('署名欄のあるPDFです。編集・保存すると電子署名は無効になります。')
       if (next.restored) setNotice('保存時の編集データから再開しました。別のアプリで保存後に加えた変更は引き継がれないため、プレビューをご確認ください。')
-    } catch (e) { if (version === loadVersion.current) {if(e instanceof EncryptedPdfError){setPasswordFile({bytes,name});setPassword('');setPasswordError('')}else setError(messageOf(e))} }
+      return true
+    } catch (e) { if (version === loadVersion.current) {if(e instanceof EncryptedPdfError){setPasswordFile({bytes,name});setPassword('');setPasswordError('')}else {setError(messageOf(e));if(bytes.length<=MAX_FILE_SIZE&&new TextDecoder('latin1').decode(bytes.slice(0,1024)).includes('%PDF-'))setRecoveryFile({bytes,name})}}return false }
     finally { if (version === loadVersion.current) setLoading(false) }
   }
   const allowOpen = () => !(editCount || dirty || history.past.length) || window.confirm('別のPDFを開くと、現在の編集履歴は消えます。必要な変更はPDFを保存してください。続けますか？')
@@ -172,8 +223,7 @@ export default function App() {
       const bytes=await unlockVisualCopy(passwordFile.bytes,password,(current,total)=>setNotice(`画像化した編集用コピーを作成中… ${current} / ${total}ページ`))
       const name=passwordFile.name.replace(/\.pdf$/iu,'')+'_画像コピー.pdf'
       setPassword('');setPasswordFile(null)
-      await openBytes(bytes,name)
-      setNotice('画像化したコピーを開きました。範囲書き換え・文字追加で編集できます。元PDFの文字情報やリンクはコピーに含まれません。')
+      if(await openBytes(bytes,name))setNotice('画像化したコピーを開きました。範囲書き換え・文字追加で編集できます。元PDFの文字情報やリンクはコピーに含まれません。')
     }catch(error){setPasswordError(String(error).includes('Password')?'パスワードが正しいか確認してください。':messageOf(error));setNotice('')}
     finally{setLoading(false)}
   }
@@ -202,7 +252,7 @@ export default function App() {
   }
   async function validateEdits(proposed: Edits, rule: CalculationRule | null) {
     const doc = await PDFDocument.create()
-    const resolveFont = createFontResolver(doc, await loadJapaneseFont(), true)
+    const resolveFont = createFontResolver(doc, await loadJapaneseFont(), true,fonts)
     for (const edit of Object.values(proposed)) { await prepareEditBackground(session!, edit.region); fitText(await resolveFont(edit), edit) }
     const next = rule ? recalculate(proposed, rule) : proposed
     if (rule) { await prepareEditBackground(session!, rule.target); fitText(await resolveFont(next[rule.target.id]), next[rule.target.id]) }
@@ -267,12 +317,32 @@ export default function App() {
     if(model)setArea({x:Math.min(40,model.width/10),y:Math.min(80,model.height/10),width:Math.min(240,model.width*0.7),height:Math.min(80,model.height*0.3)})
   }
   async function newPdf(){if(!busy&&allowOpen())await openBytes(await blankDocument(),'新しいPDF.pdf')}
+  async function visualCopy(recovery=false){
+    if(busy)return
+    const input=recovery?recoveryFile:session&&preview?{bytes:preview.bytes,name:session.name}:null
+    if(!input)return
+    if(recovery&&!allowOpen())return
+    if(!recovery&&(dirty||toolMode!=='select')){setError('入力中・追加中の変更を反映してから画像化してください。');return}
+    setLoading(true);setError('')
+    let next:DocumentSession|undefined
+    try{
+      const bytes=await unlockVisualCopy(input.bytes,'',(current,total)=>setNotice(`画像化中… ${current} / ${total}ページ`)),name=input.name.replace(/\.pdf$/iu,'')+'_画像コピー.pdf'
+      if(recovery){if(await openBytes(bytes,name))setNotice('画像化した編集用コピーを開きました。範囲書き換えで編集できます。元の文字情報・リンクは保持しません。')}
+      else{
+        next=await openPdf(bytes,name,false);await loadPage(next,0)
+        setPreview(null);setSelected(null);setModel(null);setSession(next);setPageIndex(0);setToolMode('select');setTextFilter('')
+        dispatch({type:'set',edits:{},calculation:null,document:{bytes:next.bytes,name:next.name}})
+        setNotice('画像化したコピーに切り替えました。文字情報・リンクは保持しません。「範囲書き換え」で編集でき、「元に戻す」で切替を取り消せます。')
+      }
+    }catch(error){if(next)void next.pdf.loadingTask.destroy();setError(messageOf(error));setNotice('')}
+    finally{setLoading(false)}
+  }
   async function changeDocument(operation:DocumentOperation){
     if(!session||busy||!canLeaveDraft())return
     setLoading(true);setError('');setNotice('')
     let next:DocumentSession|undefined
     try{
-      const result=await operateDocument(session.bytes,operation)
+      const result=await operateDocument(session.bytes,operation,fonts)
       next=await openPdf(result.bytes,session.name,false)
       await loadPage(next,result.active)
       const discarded=operation.type==='text'&&operation.cover?operation.hidden??[]:[]
@@ -280,9 +350,10 @@ export default function App() {
       const retained=Object.fromEntries(Object.entries(edits).filter(([id])=>!hiddenIds.has(id)))
       const rule=calculation&&[...calculation.sources,calculation.target].some(region=>discarded.some(value=>value.pageIndex===region.pageIndex&&value.text===region.text&&Math.abs(value.x-region.x)<0.05&&Math.abs(value.baseline-region.baseline)<0.05))?null:calculation
       const snapshot=await remapDocumentEdits(next,retained,rule,result.pageMap)
+      setFonts({...fonts,...next.fonts})
       setPreview(null);setSelected(null);setModel(null);setSession(next);setPageIndex(result.active);setToolMode('select')
       dispatch({type:'set',...snapshot,document:{bytes:next.bytes,name:next.name}})
-      setNotice('変更を反映しました。「元に戻す」で取り消せます。')
+      setNotice(result.notice??'変更を反映しました。「元に戻す」で取り消せます。')
     }catch(error){if(next)void next.pdf.loadingTask.destroy();setError(messageOf(error))}
     finally{setLoading(false)}
   }
@@ -307,8 +378,10 @@ export default function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if(passwordFile||showHelp)return
-      if (!(event.ctrlKey || event.metaKey)) return
       const input = event.target instanceof HTMLElement && (['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName) || event.target.isContentEditable)
+      const direction=({ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]} as Record<string,number[]>)[event.key]
+      if(direction&&!input&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&selected&&draft&&toolMode==='select'&&!busy&&!restriction){event.preventDefault();nudge(direction[0],direction[1],event.shiftKey?1:microStep);return}
+      if (!(event.ctrlKey || event.metaKey)) return
       if (event.key.toLowerCase()==='s') { event.preventDefault(); download() }
       else if (event.key==='Enter' && input) { event.preventDefault(); void applyEdit() }
       else if (!input && event.key.toLowerCase()==='z') { event.preventDefault(); event.shiftKey ? redo() : undo() }
@@ -351,9 +424,9 @@ export default function App() {
       <button type="button" className="tool-button" disabled={!session||busy} onClick={()=>void changeDocument({type:'page-add',index:pageIndex})}><Plus size={15}/>ページ追加</button>
       <button type="button" className="tool-button" disabled={!session||busy} onClick={()=>mergeInput.current?.click()}><Files size={15}/>PDF結合</button>
       <input ref={mergeInput} type="file" accept="application/pdf,.pdf" className="visually-hidden" aria-label="結合するPDFファイル" onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void merge(file)}}/>
-      <button type="button" className="tool-button" disabled={!preview||busy} onClick={printPdf}><Printer size={15}/>印刷</button>
+      <button type="button" className="tool-button" disabled={!preview||busy} onClick={()=>void visualCopy()}><Files size={15}/>画像化して編集</button><button type="button" className="tool-button" disabled={!preview||busy} onClick={printPdf}><Printer size={15}/>印刷</button>
     </div>
-    {(error || notice) && <div className={`message ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}><span>{error || notice}</span><button className="icon-button" aria-label="通知を閉じる" onClick={() => { setError(''); setNotice('') }}><X size={15}/></button></div>}
+    {(error || notice) && <div className={`message ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}><span>{error || notice}{error&&recoveryFile&&<span className="recovery-action"><button type="button" disabled={busy} onClick={()=>void visualCopy(true)}>画像化したコピーで開く</button><small>文字情報・リンクは保持しません。範囲書き換えで編集できます。</small></span>}</span><button className="icon-button" aria-label="通知を閉じる" onClick={() => { setError(''); setNotice('') }}><X size={15}/></button></div>}
 
     <main className="editor-layout">
       <aside className="pages-panel"><div className="panel-title"><Layers size={16}/><h2>ページ</h2><span className="count-badge">{session?.pdf.numPages ?? 0}</span></div>
@@ -363,7 +436,7 @@ export default function App() {
 
       <section className="document-area">
         <div className="canvas-toolbar"><span><span className="status-dot"/>{session ? `${pageIndex+1} / ${session.pdf.numPages} ページ` : 'ワークスペース'}</span>
-          {session && <div className="zoom-controls"><button className="icon-button" aria-label="縮小" onClick={() => setZoom(z=>Math.max(0.25,z-0.1))} disabled={busy}><ZoomOut size={16}/></button><label className="zoom-label"><select aria-label="表示倍率" value={zoom.toFixed(2)} onChange={e=>setZoom(Number(e.target.value))}>{[0.25,0.5,0.75,1,1.25,1.5,2].includes(Number(zoom.toFixed(2))) ? null : <option value={zoom.toFixed(2)}>{Math.round(zoom*100)}%</option>}{[0.25,0.5,0.75,1,1.25,1.5,2].map(z=><option key={z} value={z.toFixed(2)}>{z*100}%</option>)}</select><ChevronDown size={12}/></label><button className="icon-button" aria-label="拡大" onClick={()=>setZoom(z=>Math.min(2,z+0.1))} disabled={busy}><ZoomIn size={16}/></button></div>}
+          {session && <div className="zoom-controls"><button className="icon-button" aria-label="縮小" onClick={() => changeZoom(zoom-0.1)} disabled={busy}><ZoomOut size={16}/></button><label className="zoom-label"><select aria-label="表示倍率" value={zoom.toFixed(2)} onChange={e=>changeZoom(Number(e.target.value))}>{[0.25,0.5,0.75,1,1.25,1.5,2,3,4,6,8].includes(Number(zoom.toFixed(2))) ? null : <option value={zoom.toFixed(2)}>{Math.round(zoom*100)}%</option>}{[0.25,0.5,0.75,1,1.25,1.5,2,3,4,6,8].map(z=><option key={z} value={z.toFixed(2)}>{z*100}%</option>)}</select><ChevronDown size={12}/></label><button className="icon-button" aria-label="拡大" onClick={()=>changeZoom(zoom+0.1)} disabled={busy}><ZoomIn size={16}/></button></div>}
         </div>
         <div className={`workspace ${session ? 'has-document' : ''}`} ref={workspace}>
           {!session ? <div className="welcome"><span className="eyebrow">YOUR DOCUMENT, YOUR CONTROL</span><h1>PDFを、もっと自由に。</h1><p className="welcome-description">文字を選んで、書き換えて、保存する。<br/>いつものブラウザが、あなたのPDFエディターに。</p>
@@ -379,23 +452,23 @@ export default function App() {
       </section>
 
       <aside className="properties-panel"><div className="panel-title"><Type size={17}/><h2>テキスト編集</h2>{selected && <button className="icon-button" aria-label="選択を解除" onClick={()=>{if(canLeaveDraft())setSelected(null)}}><X size={15}/></button>}</div>
-        {toolMode==='select' && model && model.regions.length > 0 && <div className="text-picker"><label htmlFor="text-picker">編集する文字を選択</label><select id="text-picker" value={selected?.id ?? ''} disabled={busy} onChange={event => {
+        {toolMode==='select' && model && model.regions.length > 0 && <div className="text-picker"><label htmlFor="text-filter">このページの文字を検索</label><div className="text-filter"><input id="text-filter" type="search" value={textFilter} disabled={busy} onChange={e=>setTextFilter(e.target.value)} placeholder="文字・数字で絞り込み"/><button type="button" className="icon-button" aria-label="前の検索結果" disabled={busy||!matches.length} onClick={()=>chooseMatch(-1)}><ArrowUp size={14}/></button><button type="button" className="icon-button" aria-label="次の検索結果" disabled={busy||!matches.length} onClick={()=>chooseMatch(1)}><ArrowDown size={14}/></button></div><span className="search-count">{matches.length}件</span><label htmlFor="text-picker">編集する文字を選択</label><select id="text-picker" value={selected?.id ?? ''} disabled={busy} onChange={event => {
           const region = model.regions.find(region => region.id === event.target.value)
           if (region) chooseRegion(region)
-        }}><option value="">PDF上をクリック、または一覧から選択</option>{model.regions.map(region => <option key={region.id} value={region.id}>{edits[region.id]?.text || region.text}</option>)}</select></div>}
+        }}><option value="">PDF上をクリック、または一覧から選択</option>{selected&&!matches.some(region=>region.id===selected.id)&&<option value={selected.id}>選択中：{edits[selected.id]?.text??selected.text}</option>}{matches.map(region => <option key={region.id} value={region.id}>{(edits[region.id]?.text??region.text)||'（文字を削除）'}</option>)}</select></div>}
         {toolMode==='select' && model && <CalculationPanel model={model} rule={calculation} edits={edits} busy={busy}
           onApply={rule => void configureCalculation(rule)}
           onDisable={() => { if (!busy && canLeaveDraft()) { dispatch({ type:'set', edits, calculation:null }); setSelected(null); setNotice('自動計算を解除しました。現在の合計値は残ります。') } }}
           onShowPage={changePage}/>}
-        {toolMode!=='select'&&model?<InsertionPanel mode={toolMode} model={model} area={area} onArea={setArea} busy={busy} onInsert={value=>void insert(value)} onCancel={()=>selectTool('select')} onError={reportError} initialText={areaText}/>:selected && draft ? <div className="properties-scroll"><div className="selection-tag"><span className="selection-dot"/>テキストを選択中<span>{pageIndex+1}ページ</span></div>
-          <label className="field-label">元のテキスト</label><div className="original-text">{selected.text}</div>
+        {toolMode!=='select'&&model?<InsertionPanel mode={toolMode} model={model} area={area} onArea={setArea} busy={busy} onInsert={value=>void insert(value)} onCancel={()=>selectTool('select')} onError={reportError} initialText={areaText} fonts={fonts} onLoadFont={importFont}/>:selected && draft ? <div className="properties-scroll"><div className="selection-tag"><span className="selection-dot"/>テキストを選択中<span>{pageIndex+1}ページ</span></div>
+          {session&&preview&&<><button type="button" className="text-button selection-focus" disabled={busy} onClick={()=>changeZoom(Math.max(zoom,2),selected)}><ZoomIn size={14}/>選択文字へ移動・拡大</button><RegionPreview source={session.pdf} preview={preview.pdf} index={pageIndex} rect={selected.screen}/></>}<label className="field-label">元のテキスト</label><div className="original-text">{selected.text}</div>
           {restriction && <div className="restriction-note" role="status"><Info size={16}/><span>{restriction}{!calculatedTarget&&<button type="button" className="text-button" disabled={busy} onClick={()=>{selectTool('replace');setArea(selected.screen);setAreaText(saved?.text??selected.text)}}>この範囲を指定して書き換える</button>}</span></div>}
           <div className="text-editor-controls">
             <label className="field-label" htmlFor="replacement">変更後のテキスト</label><textarea id="replacement" value={draft.text} disabled={!!restriction || busy} maxLength={10000} rows={3} onChange={e=>setDraft({...draft,text:e.target.value})}/><div className="field-hint">改行できます · {draft.text.length}/10,000</div>
             {!restriction && <><p className="cover-notice">元の背景を復元して文字を変更します。画像のある箇所は編集範囲の背景を画像化します。元の文字はPDF内に残ります。</p><button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={busy || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button><p className="save-hint">「PDFを保存」でも入力中の変更を反映できます。</p></>}
             <div className="field-group"><div><label className="field-label" htmlFor="font-size">文字サイズ</label><div className="number-input"><input id="font-size" type="number" min="1" max="720" step="0.1" value={Number(draft.fontSize.toFixed(2))} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,fontSize:Number(e.target.value)})}/><span>pt</span></div></div><div><label className="field-label" htmlFor="text-color">文字色</label><div className="color-input"><input id="text-color" type="color" value={draft.color} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,color:e.target.value})}/><span>{draft.color.toUpperCase()}</span></div></div></div>
             <label className="field-label" htmlFor="text-align">配置</label><select id="text-align" value={draft.align} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,align:e.target.value as Draft['align']})}><option value="left">左揃え</option><option value="center">中央揃え</option><option value="right">右揃え</option></select>
-            <div className="advanced-fields"><label className="field-label" htmlFor="font-family">書体</label><select id="font-family" value={draft.family??'auto'} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,family:e.target.value as Draft['family']})}><option value="auto">元の書体に合わせる</option><option value="sans">ゴシック</option><option value="serif">明朝</option><option value="mono">等幅</option></select><label className="option-check"><input type="checkbox" checked={draft.bold??false} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,bold:e.target.checked})}/>太字</label><label className="option-check"><input type="checkbox" checked={draft.autoFit!==false} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,autoFit:e.target.checked})}/>元の領域に自動で収める</label><div className="field-group"><label>横へ移動（pt）<input aria-label="横へ移動（pt）" type="number" value={draft.offsetX??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetX:Number(e.target.value)})}/></label><label>上へ移動（pt）<input aria-label="上へ移動（pt）" type="number" value={draft.offsetY??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetY:Number(e.target.value)})}/></label></div></div><div className="font-note"><span>書体を元に合わせて自動選択</span><strong>{replacementFontLabel({ ...draft, region: selected })}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
+            <TypographyControls widthPercent={draft.widthPercent} lineHeight={draft.lineHeight} disabled={!!restriction||busy} onChange={value=>setDraft({...draft,...value})}/><div className="advanced-fields"><FontPicker id="font-family" label="書体" family={draft.family} customFontId={draft.customFontId} fonts={fonts} busy={!!restriction||busy} onChange={(family,customFontId)=>setDraft({...draft,family,customFontId})} onLoad={importFont}/><label className="option-check"><input type="checkbox" checked={draft.bold??false} disabled={!!restriction||busy||!!draft.customFontId} onChange={e=>setDraft({...draft,bold:e.target.checked})}/>太字</label><label className="option-check"><input type="checkbox" checked={draft.autoFit!==false} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,autoFit:e.target.checked})}/>元の領域に自動で収める</label><div className="field-group"><label>横へ移動（pt）<input aria-label="横へ移動（pt）" type="number" step="0.1" value={draft.offsetX??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetX:Number(e.target.value)})}/></label><label>上へ移動（pt）<input aria-label="上へ移動（pt）" type="number" step="0.1" value={draft.offsetY??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetY:Number(e.target.value)})}/></label></div><div className="nudge-controls"><label>移動の刻み（pt）<input type="number" aria-label="移動の刻み（pt）" min="0.01" max="10" step="0.1" value={microStep} disabled={!!restriction||busy} onChange={e=>setMicroStep(Number(e.target.value))}/></label><div className="nudge-buttons"><button type="button" aria-label="文字を左へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(-1,0)}><ArrowLeft size={14}/></button><button type="button" aria-label="文字を上へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,1)}><ArrowUp size={14}/></button><button type="button" aria-label="文字を下へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,-1)}><ArrowDown size={14}/></button><button type="button" aria-label="文字を右へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(1,0)}><ArrowRight size={14}/></button></div><small>矢印キーでも移動。Shift＋矢印は1pt。適用後に表示へ反映します。</small></div></div><div className="font-note"><span>書体を元に合わせて自動選択</span><strong>{replacementFontLabel({ ...draft, region: selected },fonts)}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
             <div className="autofit-note"><Check size={15}/><div>{draft.autoFit===false?'自由な大きさで配置':'元の領域に合わせて自動調整'}<small>{draft.autoFit===false?'移動量とサイズを自由に指定できます。':'幅・高さに収まるよう文字を調整します。'}{actualSize && ` 適用サイズ ${actualSize.toFixed(1)} pt`}</small></div></div>
             {saved && !calculatedTarget && <button type="button" className="text-button reset-button" disabled={busy} onClick={()=>void resetSelectedEdit()}><RotateCcw size={14}/>この変更を取り消す</button>}
           </div>
@@ -404,9 +477,9 @@ export default function App() {
       </aside>
     </main>
 
-    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.2.0</span></footer>
+    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.3.0</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
     {passwordFile&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="password-title"><h2 id="password-title">パスワード付きPDFを開く</h2><p>パスワードを使って、このブラウザ内で画像の編集用コピーを作成します。コピーは文字の自動選択・検索やリンクを保持しません。範囲書き換えや文字追加で編集できます。パスワードやPDFは送信されません。</p><label className="field-label" htmlFor="pdf-password">PDFのパスワード</label><input id="pdf-password" type="password" autoFocus autoComplete="off" value={password} disabled={busy} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void unlockFile()}}/>{passwordError&&<p role="alert">{passwordError}</p>}<button type="button" className="button primary" disabled={busy} onClick={()=>void unlockFile()}>画像化して開く</button><button type="button" className="text-button" disabled={busy} onClick={()=>{setPasswordFile(null);setPassword('');setPasswordError('')}}>キャンセル</button></section></div>}
-    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックするか一覧から選んで内容を変更します。「変更を適用」でプレビューを確認し、「PDFを保存」で別名ダウンロードできます。保存ボタンは入力中の変更も反映します。</p><h3>背景を保ちながら文字を編集</h3><p>元の背景を復元して文字を重ねます。単色の背景は色を引き継ぎ、画像や模様のある部分は編集する小さな範囲を画像として復元します。この部分は拡大時に画像の解像度の影響を受けます。回転ページ・回転文字にも対応します。重なる文字、縦書き、特殊なクリップや透明効果など、自動選択で編集できない箇所には「範囲書き換え」を使ってください。書体・色・サイズ・太字・位置を変更でき、改行も使えます。「元の領域に自動で収める」を外すと自由な大きさで配置できます。書体の完全な再現を保証するものではありません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。このバージョンで保存したPDFには、元のPDFと編集データを含めて保存し、このツールで再編集できます。元のデータも残るためファイルサイズは増えます。旧バージョンや別アプリで保存したPDFには、文字の重複により再編集できない領域があります。別アプリで加えた変更は、編集データからの再開時に引き継がれない場合があります。</p></div><h3>新規作成・追加・ページ操作</h3><p>新規PDF、文字・画像・図形の追加、ページ追加・削除・並べ替え・回転、PDF結合に対応します。追加の場所はPDF上のドラッグか数値で指定します。「範囲書き換え」は指定した範囲の背景や画像も選んだ色で覆うため、保存前にプレビューで確認してください。スキャンPDFも手動で書き換えられます。OCRは使用しません。画像はPNG・JPEG・WebP・GIF・BMPに対応し、GIFは最初の画像を使います。印刷は別タブに開いたPDFの印刷ボタンから行えます。</p><h3>読み込みと履歴</h3><p>ブラウザのメモリを保護するため、入力100 MB・2,000ページ、置換1件10,000文字、文字サイズ1〜720 ptを上限とします。履歴はこのタブ内で最大40操作、文書の履歴は合計256 MB以内で保持します。ページ操作も元に戻す・やり直すの対象です。パスワード付きPDFは、パスワードを入力して画像化したコピーで編集できます。このコピーは文字情報・リンクなどを保持しません。電子署名は編集・保存すると無効になります。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定と計算結果をPDFの編集データにも保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP・Noto Serif JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
+    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックするか一覧から選んで内容を変更します。「変更を適用」でプレビューを確認し、「PDFを保存」で別名ダウンロードできます。保存ボタンは入力中の変更も反映します。</p><h3>背景を保ちながら文字を編集</h3><p>元の背景を復元して文字を重ねます。単色の背景は色を引き継ぎ、画像や模様のある部分は編集する小さな範囲を画像として復元します。この部分は拡大時に画像の解像度の影響を受けます。回転ページ・回転文字にも対応します。重なる文字、縦書き、特殊なクリップや透明効果など、自動選択で編集できない箇所には「範囲書き換え」を使ってください。書体・色・サイズ・太字・位置を変更でき、改行も使えます。「元の領域に自動で収める」を外すと自由な大きさで配置できます。書体の完全な再現を保証するものではありません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。このバージョンで保存したPDFには、元のPDFと編集データを含めて保存し、このツールで再編集できます。元のデータも残るためファイルサイズは増えます。旧バージョンや別アプリで保存したPDFには、文字の重複により再編集できない領域があります。別アプリで加えた変更は、編集データからの再開時に引き継がれない場合があります。</p></div><h3>細かい文字・書式の調整</h3><p>このページの文字を検索して候補を絞り込めます。表示倍率は25〜800%、選択範囲は元の表示と適用後を4倍で比較できます。位置は0.1pt刻み（刻みを変更可能）で微調整でき、矢印キー・Shift＋矢印キーでも動かせます。矢印は画面の向き、数値欄は元の文字の方向を基準にします。字幅10〜500%、行間0.5〜5倍も指定できます。自動調整が有効な間は元の範囲へ収める処理が優先されます。</p><p>手元のTTF・OTFフォントを読み込み、変更・追加の両方に使えます。1ファイル20 MB、合計50 MB・16書体まで。PDFへの埋め込み・編集利用が許可されたフォントを選んでください。フォントファイルの太さ・斜体をそのまま使い、このツールで太字を合成しません。使用したフォントもPDFへ保存するため容量が増え、元データと同様に取り出せる場合があります。OSに入っているフォントを無断で収集せず、選択したファイルだけをブラウザ内で扱います。元と同じファイルでも、特殊な組版や文字間隔まで完全一致するとは限りません。</p><h3>新規作成・追加・ページ操作</h3><p>新規PDF、文字・画像・図形の追加、ページ追加・削除・並べ替え・回転、PDF結合に対応します。追加の場所はPDF上のドラッグか数値で指定します。「範囲書き換え」は指定した範囲の背景や画像も選んだ色で覆うため、保存前にプレビューで確認してください。スキャンPDFも手動で書き換えられます。OCRは使用しません。画像はPNG・JPEG・WebP・GIF・BMPに対応し、GIFは最初の画像を使います。印刷は別タブに開いたPDFの印刷ボタンから行えます。</p><h3>通常の編集が難しいPDF</h3><p>「画像化して編集」は現在の見た目を画像のコピーにし、「範囲書き換え」などで編集を続ける機能です。文字情報・検索・リンク等は保持せず、拡大品質は画像の解像度に依存します。切替は元に戻せます。読み込みに失敗しても、PDF表示が可能なら「画像化したコピーで開く」で編集できる場合があります。</p><h3>読み込みと履歴</h3><p>ブラウザのメモリを保護するため、入力100 MB・2,000ページ、置換1件10,000文字、文字サイズ1〜720 ptを上限とします。履歴はこのタブ内で最大40操作、文書の履歴は合計256 MB以内で保持します。ページ操作も元に戻す・やり直すの対象です。パスワード付きPDFは、パスワードを入力して画像化したコピーで編集できます。このコピーは文字情報・リンクなどを保持しません。電子署名は編集・保存すると無効になります。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定と計算結果をPDFの編集データにも保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP・Noto Serif JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
   </div>
 }

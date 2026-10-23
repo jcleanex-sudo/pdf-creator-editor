@@ -1,0 +1,3 @@
+export function TypographyControls({widthPercent=100,lineHeight=1.2,disabled,onChange}:{widthPercent?:number;lineHeight?:number;disabled:boolean;onChange:(values:{widthPercent:number;lineHeight:number})=>void}){
+  return <div className="typography-controls field-group"><label>字幅（%）<input aria-label="字幅（%）" type="number" min="10" max="500" step="0.1" value={widthPercent} disabled={disabled} onChange={event=>onChange({widthPercent:Number(event.target.value),lineHeight})}/></label><label>行間（倍）<input aria-label="行間（倍）" type="number" min="0.5" max="5" step="0.05" value={lineHeight} disabled={disabled} onChange={event=>onChange({widthPercent,lineHeight:Number(event.target.value)})}/></label></div>
+}

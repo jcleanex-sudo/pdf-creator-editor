@@ -81,6 +81,18 @@ describe('text placement and validation',()=>{
     const ink=glyphMetrics(font,'二行目')!
     expect(fitted.baseline-fitted.size*1.2-ink.descent*fitted.size).toBeGreaterThanOrEqual(base.region.rect.y+0.35-1e-7)
   })
+  it('uses fine width and line spacing values in the actual placement and validates their range',()=>{
+    const fit=fitText(font,{...base,text:'日本語\n二行目',autoFit:false,fontSize:20,widthPercent:82.5,lineHeight:1.7,offsetX:0.1,offsetY:-0.2})
+    expect(fit.size).toBe(20);expect(fit.scaleX).toBeCloseTo(0.825);expect(fit.lineHeight).toBe(34)
+    expect(fit.width).toBeCloseTo(font.widthOfTextAtSize('二行目',20)*0.825)
+    expect(fit.x).toBeCloseTo(base.region.x+0.1);expect(fit.baseline).toBeCloseTo(base.region.baseline-0.2)
+    const fitted=fitText(font,{...base,text:'日本語\n二行目',widthPercent:160,lineHeight:2})
+    expect(fitted.width).toBeLessThanOrEqual(base.region.width+1e-7)
+    const ink=glyphMetrics(font,'二行目')!
+    expect(fitted.baseline-fitted.lineHeight-ink.descent*fitted.size).toBeGreaterThanOrEqual(base.region.rect.y+0.35-1e-7)
+    expect(()=>fitText(font,{...base,widthPercent:NaN})).toThrow('字幅')
+    expect(()=>fitText(font,{...base,lineHeight:0})).toThrow('行間')
+  })
 })
 
 describe('PDF preservation and Japanese export',()=>{
