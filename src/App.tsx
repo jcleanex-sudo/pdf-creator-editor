@@ -7,7 +7,7 @@ import { CalculationPanel } from './components/CalculationPanel'
 import { calculateTotal, formatAmount, recalculate, sampleCalculation, type CalculationRule } from './pdf/calculation'
 import { editRestriction, loadPage, MAX_FILE_SIZE, openPdf, readPdf, prepareEditBackground, EncryptedPdfError, remapDocumentEdits } from './pdf/reader'
 import { createFontResolver, replacementFontLabel, replacementFontWarning, fitText, loadJapaneseFont, makeSample, writePdf } from './pdf/output'
-import type { DocumentSession, Edits, PageModel, Replacement, TextRegion } from './pdf/types'
+import type { DocumentSession, Edits, PageModel, Replacement, TextRegion, Rect } from './pdf/types'
 import { getLicenseUrl, portableAssets } from './pdf/portable'
 import { originalColor, originalAlign } from './pdf/appearance'
 import { describeHiddenText } from './pdf/hidden-text'
@@ -103,6 +103,15 @@ export default function App() {
     setDraft({ text: saved?.text ?? selected.text, fontSize: saved?.fontSize ?? selected.fontSize, color: saved?.color ?? originalColor(selected), align: saved?.align ?? originalAlign(selected), autoFit:saved?.autoFit??true, family:saved?.family??'auto', bold:saved?.bold??selected.appearance?.bold??false, offsetX:saved?.offsetX??0, offsetY:saved?.offsetY??0,customFontId:saved?saved.customFontId:selected.customFontId,widthPercent:saved?.widthPercent??100,lineHeight:saved?.lineHeight??1.2 })
     setActualSize(null)
   }, [selected, saved])
+
+  useEffect(()=>{
+    if(!selected||toolMode!=='select')return
+    const frame=requestAnimationFrame(()=>{
+      const input=document.getElementById('replacement') as HTMLTextAreaElement|null
+      if(input&&!input.disabled){input.focus({preventScroll:true});input.select();input.scrollIntoView({block:'nearest'})}
+    })
+    return ()=>cancelAnimationFrame(frame)
+  },[selected,toolMode,!!draft])
 
   useEffect(() => {
     if (!session) return
@@ -362,6 +371,11 @@ export default function App() {
     setSelected(null);setToolMode(mode);setAreaText('');setError('')
     if(model)setArea({x:Math.min(40,model.width/10),y:Math.min(80,model.height/10),width:Math.min(240,model.width*0.7),height:Math.min(80,model.height*0.3)})
   }
+  function editAt(rect:Rect){
+    if(busy||!canLeaveDraft())return
+    setSelected(null);setToolMode('replace');setArea(rect);setAreaText('');setError('')
+    setNotice('ここには選択できる文字情報がありません。枠を文字に合わせてドラッグで調整し、右側に変更後の文字を入力してください。適用すると枠内の背景も覆います。')
+  }
   async function newPdf(){if(!busy&&allowOpen())await openBytes(await blankDocument(),'新しいPDF.pdf')}
   async function visualCopy(recovery=false){
     if(busy)return
@@ -469,7 +483,7 @@ export default function App() {
       <button type="button" className="icon-button" aria-label="元に戻す" title="元に戻す (Ctrl+Z)" disabled={busy || !history.past.length} onClick={undo}><RotateCcw size={18}/></button>
       <button type="button" className="icon-button" aria-label="やり直す" title="やり直す (Ctrl+Shift+Z)" disabled={busy || !history.future.length} onClick={redo}><RotateCw size={18}/></button>
       <span className="toolbar-divider"/>
-      <span className="tool-mode"><MousePointer2 size={15}/>文字を編集</span>
+      <button type="button" className="tool-mode" disabled={!session||busy} onClick={()=>selectTool('select')}><MousePointer2 size={15}/>文字を編集</button>
       <div className="toolbar-file">{session ? <><FileText size={15}/><span title={session.name}>{session.name}</span>{editCount>0 && <span className="unsaved-dot" title={`${editCount}箇所の変更`}/>}</> : <span>ファイルを開いて、編集をはじめましょう</span>}</div>
       <button className="button primary save-button" onClick={download} disabled={!session || !preview || preview.edits !== edits || preview.calculation !== calculation || busy || previewError}><ArrowDownToLine size={17}/>PDFを保存</button>
     </div>
@@ -506,8 +520,8 @@ export default function App() {
             <button type="button" className="sample-button" disabled={busy} onClick={()=>void openSample()}><FilePlus2 size={16}/>サンプルPDFを試す<ArrowRight size={15}/></button>
             <div className="welcome-benefits"><span><LockKeyhole size={15}/>アップロード不要</span><span><Check size={15}/>日本語に対応</span><span><Check size={15}/>無料・アカウント不要</span></div>
           </div> : <>
-            {model && preview ? <><div className="document-hint"><MousePointer2 size={14}/>PDF上の文字をクリックして選択<span>{model.regions.length}件の文字領域</span>{calculation && <span className="calculation-active">合計を自動計算・税率{calculation.taxPercent}%</span>}</div><PdfPage pdf={preview.pdf} pageIndex={pageIndex} model={model} zoom={zoom} selected={selected?.id} edits={edits} disabled={busy} onSelect={chooseRegion} onError={reportError} drawing={toolMode!=='select'} area={area} onArea={setArea}/><div className="page-navigation"><button className="icon-button" aria-label="前のページ" onClick={()=>changePage(pageIndex-1)} disabled={pageIndex===0 || busy}><ArrowLeft size={16}/></button><span>{pageIndex+1} / {session.pdf.numPages}</span><button className="icon-button" aria-label="次のページ" onClick={()=>changePage(pageIndex+1)} disabled={pageIndex===session.pdf.numPages-1 || busy}><ArrowRight size={16}/></button></div></> : <div className="workspace-loading"><LoaderCircle className="spin" size={24}/><p>PDFを読み込んでいます…</p></div>}
-            {model?.regions.length===0 && <div className="inline-note">文字情報がありません。「範囲書き換え」で画像の文字を覆って書き換えたり、「文字追加」で記入できます。</div>}
+            {model && preview ? <><div className="document-hint"><MousePointer2 size={14}/>文字をクリックして選択 · 選べない場所は範囲で書き換え<span>{model.regions.length}件の文字領域</span>{calculation && <span className="calculation-active">合計を自動計算・税率{calculation.taxPercent}%</span>}</div><PdfPage pdf={preview.pdf} pageIndex={pageIndex} model={model} zoom={zoom} selected={selected?.id} edits={edits} disabled={busy} onSelect={chooseRegion} onError={reportError} drawing={toolMode!=='select'} area={area} onArea={setArea} onUnrecognized={editAt}/><div className="page-navigation"><button className="icon-button" aria-label="前のページ" onClick={()=>changePage(pageIndex-1)} disabled={pageIndex===0 || busy}><ArrowLeft size={16}/></button><span>{pageIndex+1} / {session.pdf.numPages}</span><button className="icon-button" aria-label="次のページ" onClick={()=>changePage(pageIndex+1)} disabled={pageIndex===session.pdf.numPages-1 || busy}><ArrowRight size={16}/></button></div></> : <div className="workspace-loading"><LoaderCircle className="spin" size={24}/><p>PDFを読み込んでいます…</p></div>}
+            {model?.regions.length===0 && <div className="inline-note">画像や図形として保存されたPDFです。編集したい文字をクリックすると「範囲書き換え」を始められます。枠を調整して、変更後の文字を入力してください。</div>}
 
           </>}
         </div>
@@ -539,7 +553,7 @@ export default function App() {
       </aside>
     </main>
 
-    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.4.0</span></footer>
+    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.4.1</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
     {showSearch&&session&&<DocumentSearch session={session} edits={edits} busy={busy} onClose={()=>setShowSearch(false)} onJump={jumpToHit} onReplace={batchReplace}/>}
     {showPages&&session&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="pages-title"><div className="help-heading"><h2 id="pages-title">ページの抜き出し・移動</h2><button type="button" className="icon-button" aria-label="ページ操作を閉じる" disabled={busy} onClick={()=>setShowPages(false)}><X size={20}/></button></div><p>適用済みの編集を含めて、指定したページを別のPDFへ保存します。順序の変更や同じページの複数指定もできます。</p><label className="field-label" htmlFor="page-range">保存するページ（例：1,3-5）</label><input id="page-range" value={pageRange} disabled={busy} onChange={e=>setPageRange(e.target.value)}/><p>全{session.pdf.numPages}ページ。「3-1」は逆順、「1,1」は複製です。元のPDFのページは削除しません。しおり・フォーム操作や文書全体の設定は引き継ぎません。</p>{pagesError&&<p role="alert" className="batch-error">{pagesError}</p>}<button type="button" className="button primary" disabled={busy||!pageRange} onClick={()=>void exportRange()}>指定ページをPDFで保存</button><hr/><h3>現在の{pageIndex+1}ページを移動</h3><label className="field-label" htmlFor="page-move-to">移動先のページ番号</label><input id="page-move-to" type="number" min="1" max={session.pdf.numPages} step="1" value={moveTo} disabled={busy} onChange={e=>setMoveTo(Number(e.target.value))}/><button type="button" className="button secondary" disabled={busy||!Number.isInteger(moveTo)||moveTo<1||moveTo>session.pdf.numPages||moveTo===pageIndex+1} onClick={()=>{setShowPages(false);void changeDocument({type:'page-move',index:pageIndex,to:moveTo-1})}}>指定位置へ移動</button></section></div>}

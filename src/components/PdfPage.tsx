@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import type { Edits, PageModel, TextRegion, Rect } from '../pdf/types'
+import { areaAt, pickRegion } from '../pdf/selection'
 
 type Props = {
   pdf: PDFDocumentProxy
@@ -15,9 +16,10 @@ type Props = {
   drawing?: boolean
   area?: Rect
   onArea?: (rect:Rect)=>void
+  onUnrecognized?: (rect:Rect)=>void
 }
 
-export function PdfPage({ pdf, pageIndex, model, zoom, selected, edits, disabled, onSelect, onError, drawing, area, onArea }: Props) {
+export function PdfPage({ pdf, pageIndex, model, zoom, selected, edits, disabled, onSelect, onError, drawing, area, onArea, onUnrecognized }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const [rendering, setRendering] = useState(true)
   const drag=useRef<{x:number;y:number}|null>(null)
@@ -45,11 +47,17 @@ export function PdfPage({ pdf, pageIndex, model, zoom, selected, edits, disabled
     return () => { canceled = true; task?.cancel() }
   }, [pdf, pageIndex, zoom, model.width, model.height, onError])
 
-  const point=(event:React.PointerEvent<HTMLDivElement>)=>{
+  const point=(event:React.MouseEvent<HTMLDivElement>)=>{
     const box=event.currentTarget.getBoundingClientRect()
-    return {x:Math.max(0,Math.min(model.width,(event.clientX-box.left)/zoom)),y:Math.max(0,Math.min(model.height,(event.clientY-box.top)/zoom))}
+    return {x:Math.max(0,Math.min(model.width,(event.clientX-box.left)*model.width/box.width)),y:Math.max(0,Math.min(model.height,(event.clientY-box.top)*model.height/box.height))}
   }
   return <div className={`pdf-paper ${drawing?'drawing':''}`} style={{ width: model.width*zoom, height: model.height*zoom }} aria-label={`${pageIndex+1}ページ目のPDF`}
+    onClick={event=>{
+      if(drawing||disabled||rendering||(event.target instanceof Element&&event.target.closest('.text-hit')))return
+      const location=point(event),scale=event.currentTarget.getBoundingClientRect().width/model.width
+      const region=pickRegion(model.regions,location,scale)
+      if(region)onSelect(region);else onUnrecognized?.(areaAt(location,model.width,model.height))
+    }}
     onPointerDown={event=>{if(!drawing||disabled||event.button!==0)return;event.preventDefault();drag.current=point(event);event.currentTarget.setPointerCapture(event.pointerId)}}
     onPointerMove={event=>{if(!drag.current||!drawing||disabled)return;const end=point(event),start=drag.current;onArea?.({x:Math.min(start.x,end.x),y:Math.min(start.y,end.y),width:Math.max(1,Math.abs(end.x-start.x)),height:Math.max(1,Math.abs(end.y-start.y))})}}
     onPointerUp={event=>{if(!drag.current)return;const end=point(event),start=drag.current;if(Math.abs(end.x-start.x)<2&&Math.abs(end.y-start.y)<2)onArea?.({x:start.x,y:start.y,width:Math.min(220,model.width-start.x),height:Math.min(60,model.height-start.y)});drag.current=null}}

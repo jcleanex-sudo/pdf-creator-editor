@@ -34,7 +34,7 @@ test('edits text over colors, images and lines by restoring the background', asy
   })
   await expect(page.getByRole('button',{name:'文字を選択: Blue on white',exact:true})).toBeVisible()
   await page.getByRole('button',{name:'2ページへ',exact:true}).click()
-  await expect(page.locator('.inline-note')).toContainText('文字情報がありません')
+  await expect(page.locator('.inline-note')).toContainText('編集したい文字をクリックすると「範囲書き換え」を始められます')
   await page.locator('.paper-loading').waitFor({state:'hidden'})
   const reference=await page.locator('.page-canvas').evaluate(element=>{const c=element as HTMLCanvasElement;return Array.from(c.getContext('2d')!.getImageData(0,0,c.width,c.height).data)})
   await page.getByRole('button',{name:'1ページへ',exact:true}).click()

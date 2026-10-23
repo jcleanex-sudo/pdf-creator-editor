@@ -127,7 +127,7 @@ test('handles image-only PDFs and edits rotated pages',async({page})=>{
   await page.goto('/')
   const blank=await PDFDocument.create();blank.addPage()
   await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'no-text.pdf',mimeType:'application/pdf',buffer:Buffer.from(await blank.save())})
-  await expect(page.locator('.inline-note')).toContainText('文字情報がありません')
+  await expect(page.locator('.inline-note')).toContainText('編集したい文字をクリックすると「範囲書き換え」を始められます')
   const rotated=await PDFDocument.create(),p=rotated.addPage()
   p.drawText('Rotated text',{font:await rotated.embedFont(StandardFonts.Helvetica),x:50,y:500,size:14})
   p.setRotation(degrees(90))
