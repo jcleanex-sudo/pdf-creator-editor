@@ -1,6 +1,8 @@
 type PortableAssets = {
   font: string
   boldFont: string
+  serifFont: string
+  boldSerifFont: string
   worker: string
   resources: Record<string,string>
   notices: string

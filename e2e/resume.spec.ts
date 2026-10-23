@@ -25,7 +25,7 @@ test('selects from the text list, saves an unapplied draft and resumes repeated 
   const before = await page.locator('.page-canvas').evaluate(element => Array.from((element as HTMLCanvasElement).getContext('2d')!.getImageData(0, 0, (element as HTMLCanvasElement).width, (element as HTMLCanvasElement).height).data))
 
   const reopened = await context.newPage(); await reopened.goto('/')
-  await reopened.locator('input[type=file]').setInputFiles(firstPath)
+  await reopened.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(firstPath)
   await expect(reopened.locator('.message.success')).toContainText('編集データから再開')
   await reopened.getByRole('button', { name: '文字を選択: 160,000', exact: true }).click()
   await expect(reopened.getByLabel('変更後のテキスト')).toBeEnabled()
@@ -52,7 +52,7 @@ test('selects from the text list, saves an unapplied draft and resumes repeated 
   expect(secondBytes.length).toBeLessThan(firstBytes.length + 10_000)
   expect(secondPdf.getPage(0).node.Contents()?.toString()).toBe(firstPdf.getPage(0).node.Contents()?.toString())
   const third = await context.newPage(); await third.goto('/')
-  await third.locator('input[type=file]').setInputFiles(secondPath)
+  await third.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(secondPath)
   await expect(third.getByRole('button', { name: '文字を選択: 220,000', exact: true })).toBeAttached()
   await third.getByLabel('編集する文字を選択', { exact: true }).selectOption({ label: '170,000' })
   await expect(third.getByLabel('変更後のテキスト')).toBeEnabled()
@@ -64,7 +64,7 @@ test('rejects invalid restored text references and retains the open document', a
   source.addPage().drawText('Original document', { x: 50, y: 700, size: 16 })
   const bytes = await source.save()
   await page.goto('/')
-  await page.locator('input[type=file]').setInputFiles({ name: 'source.pdf', mimeType: 'application/pdf', buffer: Buffer.from(bytes) })
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({ name: 'source.pdf', mimeType: 'application/pdf', buffer: Buffer.from(bytes) })
   const original = page.getByRole('button', { name: '文字を選択: Original document', exact: true })
   await expect(original).toBeVisible()
   const invalid = await PDFDocument.load(bytes)
@@ -72,7 +72,7 @@ test('rejects invalid restored text references and retains the open document', a
   invalid.catalog.set(PDFName.of('PDFEditorProjectV1'), invalid.context.register(invalid.context.stream(JSON.stringify({
     version: 1, calculation: null, edits: [{ id: '0:999999', text: 'changed', fontSize: 16, color: '#000000', align: 'left' }],
   }))))
-  await page.locator('input[type=file]').setInputFiles({ name: 'invalid-project.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await invalid.save()) })
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({ name: 'invalid-project.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await invalid.save()) })
   await expect(page.getByRole('alert')).toContainText('編集データを復元できません')
   await original.click()
   await expect(page.getByLabel('変更後のテキスト')).toBeEnabled()

@@ -16,7 +16,7 @@ test('edits short table cells without erasing rules, including Japanese and comm
   }
   pdf.addPage([600,800]).drawText('Untouched page')
   await page.goto('/')
-  await page.locator('input[type=file]').setInputFiles({name:'dense-table.pdf',mimeType:'application/pdf',buffer:Buffer.from(await pdf.save())})
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'dense-table.pdf',mimeType:'application/pdf',buffer:Buffer.from(await pdf.save())})
   const target=(text:string)=>page.getByRole('button',{name:`文字を選択: ${text}`,exact:true})
   await expect(target('123,456')).toBeVisible()
   await page.locator('.paper-loading').waitFor({state:'hidden'})
@@ -51,7 +51,7 @@ test('edits short table cells without erasing rules, including Japanese and comm
   await page.getByRole('button',{name:'PDFを保存',exact:true}).click()
   const path=info.outputPath('edited-table.pdf');await(await event).saveAs(path)
   const reopened=await context.newPage();await reopened.goto('/')
-  await reopened.locator('input[type=file]').setInputFiles(path)
+  await reopened.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(path)
   await reopened.getByRole('button',{name:'文字を選択: 124,567',exact:true}).click()
   await expect(reopened.getByLabel('変更後のテキスト')).toBeEnabled()
   await expect(reopened.getByRole('button',{name:'文字を選択: 編集内容',exact:true})).toBeAttached()

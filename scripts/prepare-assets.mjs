@@ -38,5 +38,7 @@ async function visit(name,from) {
   for (const dependency of Object.keys(json.dependencies ?? {})) await visit(dependency,candidate)
 }
 for(const name of Object.keys(manifest.dependencies)) await visit(name,root)
-await writeFile(path.join(root,'public/THIRD_PARTY_NOTICES.txt'),sections.join('\n\n'))
+// Noto Serif JP is only requested when a serif/Mincho face is needed.
+const serifNotice=`\n\nNoto Serif JP — SIL Open Font License 1.1\nSource: https://github.com/google/fonts/tree/main/ofl/notoserifjp\nVariable source SHA-256: 2fd527ba12b6a44ec30d796d633360da0aeba6c5d4af1304ce12bb4dc15a7dfc\nStatic wght=400/700 instances generated using FontTools 4.61.1.\n`+await readFile(path.join(root,'public/fonts/OFL-Serif.txt'),'utf8')
+await writeFile(path.join(root,'public/THIRD_PARTY_NOTICES.txt'),sections.join('\n\n')+serifNotice)
 console.log(`Prepared PDF.js local assets and notices for ${seen.size} production packages.`)

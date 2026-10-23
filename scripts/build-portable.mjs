@@ -16,7 +16,7 @@ for(const folder of ['cmaps','standard_fonts','wasm']) {
   }
 }
 const worker=await readFile(path.join(root,'node_modules/pdfjs-dist/build/pdf.worker.min.mjs'),'utf8')
-const bundle={font:await b64(path.join(dist,'fonts/NotoSansJP-Regular.ttf')),boldFont:await b64(path.join(dist,'fonts/NotoSansJP-Bold.ttf')),worker,resources,notices}
+const bundle={font:await b64(path.join(dist,'fonts/NotoSansJP-Regular.ttf')),boldFont:await b64(path.join(dist,'fonts/NotoSansJP-Bold.ttf')),serifFont:await b64(path.join(dist,'fonts/NotoSerifJP-Regular.ttf')),boldSerifFont:await b64(path.join(dist,'fonts/NotoSerifJP-Bold.ttf')),worker,resources,notices}
 // Escape '<' to prevent any bundled source/notices from closing a script element.
 const payload=JSON.stringify(bundle).replaceAll('<','\\u003c')
 html=html.replace('</head>',()=>`<script>globalThis.__PDF_EDITOR_PORTABLE__=${payload};</script></head>`)

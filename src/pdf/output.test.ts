@@ -31,8 +31,8 @@ describe('text placement and validation',()=>{
     const fit=fitText(font,{...base,text:'日本語',align:'right'})
     expect(fit.x+fit.width).toBeCloseTo(base.region.x+base.region.width)
   })
-  it('rejects line breaks and unsupported characters before export',()=>{
-    expect(()=>fitText(font,{...base,text:'a\nb'})).toThrow('改行')
+  it('rejects controls and unsupported characters before export',()=>{
+    expect(()=>fitText(font,{...base,text:'a\tb'})).toThrow('制御文字')
     expect(()=>fitText(font,{...base,text:'🦄'})).toThrow('保存できない文字')
   })
   it('rejects invalid sizes, colors, and text too long to fit',()=>{
@@ -71,6 +71,15 @@ describe('text placement and validation',()=>{
     expect(fit.baseline).toBeGreaterThan(100)
     expect(fit.baseline-ink.descent*fit.size).toBeGreaterThanOrEqual(edit.region.rect.y+0.35-1e-7)
     expect(fit.baseline+ink.ascent*fit.size).toBeLessThanOrEqual(edit.region.rect.y+edit.region.rect.height-0.35+1e-7)
+  })
+  it('supports multiple lines and preserves explicitly free sizes and offsets',()=>{
+    const fit=fitText(font,{...base,text:'日本語\n二行目',autoFit:false,fontSize:32,offsetX:12,offsetY:8})
+    expect(fit.size).toBe(32);expect(fit.scaleX).toBe(1);expect(fit.x).toBe(base.region.x+12);expect(fit.baseline).toBe(base.region.baseline+8)
+    expect(fit.lines).toEqual(['日本語','二行目'])
+    const fitted=fitText(font,{...base,text:'日本語\n二行目'})
+    expect(fitted.size).toBeGreaterThanOrEqual(1)
+    const ink=glyphMetrics(font,'二行目')!
+    expect(fitted.baseline-fitted.size*1.2-ink.descent*fitted.size).toBeGreaterThanOrEqual(base.region.rect.y+0.35-1e-7)
   })
 })
 

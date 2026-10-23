@@ -43,7 +43,7 @@ test('sample recalculates 209,000, undoes both amounts together, rejects bad amo
   await (await event).saveAs(output)
   const reopened = await context.newPage()
   await reopened.goto('/')
-  await reopened.locator('input[type=file]').setInputFiles(output)
+  await reopened.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(output)
   await expect(text(reopened, '160,000')).toBeAttached()
   await expect(text(reopened, '209,000')).toBeAttached()
   // Restore explicit source bindings rather than inferring hidden text.
@@ -56,7 +56,7 @@ test('configures an uploaded PDF explicitly, recalculates decimal tax, and undoe
   const font = await pdf.embedFont(StandardFonts.Helvetica)
   for (const [index, amount] of ['100', '200', '300'].entries())
     paper.drawText(amount, { x: 400, y: 700 - index * 50, size: 20, font })
-  await page.locator('input[type=file]').setInputFiles({ name: 'invoice.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await pdf.save()) })
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({ name: 'invoice.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await pdf.save()) })
   await text(page, '100').click()
   await page.locator('.calculation-panel summary').click()
   await page.getByLabel('合計を書き込む欄').selectOption({ label: '300' })

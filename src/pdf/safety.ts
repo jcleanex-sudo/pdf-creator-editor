@@ -9,6 +9,7 @@ export function editRestriction(region: TextRegion, page: PageModel): string | u
   if (region.unsupportedReason) return region.unsupportedReason
   if (page.regions.some(other => other.id !== region.id && overlap(region.screen, other.screen)))
     return '近くの文字と領域が重なっています。ほかの文字を保護するため編集できません。'
+  if (region.background || page.supportsBackground) return
   const { pixels, pixelScale: scale } = page
   const {left, top, right, bottom} = pixelBounds(region.screen, scale, pixels)
   let count=0
@@ -19,7 +20,7 @@ export function editRestriction(region: TextRegion, page: PageModel): string | u
     // export must be white, including the middle of the region where an image
     // or a thin line could otherwise pass a majority-white test.
     if (Math.min(r,g,b)<246)
-      return '白い背景を確認できません。背景や図形を保護するため、この領域は編集できません。'
+      return '白い背景を確認できません。背景を復元できないため、「範囲書き換え」を使用してください。'
     count++
   }
   if (!count)

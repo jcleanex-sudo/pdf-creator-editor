@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { PDFDocument, StandardFonts, degrees } from 'pdf-lib'
-import { readFile } from 'node:fs/promises'
+import { readFile, open } from 'node:fs/promises'
 
 const textButton=(page: Page,text: string)=>page.getByRole('button',{name:`文字を選択: ${text}`,exact:true})
 const ready=(page: Page,count: number)=>expect(page.locator('.status-left')).toContainText(`${count}箇所の変更`)
@@ -20,7 +20,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await source.saveAs(sourcePath)
 
   // Exercise actual file input, not just the sample-document path.
-  await page.locator('input[type=file]').setInputFiles(sourcePath)
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(sourcePath)
   await expect(textButton(page,'150,000')).toBeVisible()
   await expect(page.locator('.toolbar-file')).toContainText('original.pdf')
   await page.locator('.paper-loading').waitFor({state:'hidden'})
@@ -37,8 +37,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   for(const ink of titleInk) expect(ink).toBeGreaterThan(110)
 
   await textButton(page,'品名').click()
-  await expect(page.locator('.restriction-note')).toContainText('白い背景')
-  await expect(page.getByLabel('変更後のテキスト')).toBeDisabled()
+  await expect(page.getByLabel('変更後のテキスト')).toBeEnabled()
   await textButton(page,'150,000').click()
   const masks: {x:number;y:number;width:number;height:number}[]=[]
   async function rememberMask(text:string) {
@@ -90,7 +89,7 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   await page.screenshot({path:info.outputPath('editor.png'),fullPage:true})
   const reopened=await context.newPage()
   await reopened.goto('/')
-  await reopened.locator('input[type=file]').setInputFiles(outputPath)
+  await reopened.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(outputPath)
   await expect(textButton(reopened,'250,000')).toBeAttached()
   await expect(textButton(reopened,'株式会社テスト 御中')).toBeAttached()
   await expect(textButton(reopened,'308,000')).toBeAttached()
@@ -102,19 +101,20 @@ test('real upload, Japanese/numeric replacement, preview preservation, undo/redo
   expect(errors).toEqual([])
 })
 
-test('rejects invalid inputs and unsupported edits, preserving the current document',async({page})=>{
+test('rejects invalid inputs and unsupported edits, preserving the current document',async({page},info)=>{
   await page.goto('/')
   await page.getByRole('button',{name:'サンプルPDFを試す'}).click()
   await expect(textButton(page,'150,000')).toBeVisible()
-  await page.locator('input[type=file]').setInputFiles({name:'broken.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-1.7\nnot a valid document')})
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'broken.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-1.7\nnot a valid document')})
   await expect(page.getByRole('alert')).toContainText('PDFを読み込めません')
   await expect(textButton(page,'150,000')).toBeVisible()
-  await page.locator('input[type=file]').setInputFiles({name:'too-large.pdf',mimeType:'application/pdf',buffer:Buffer.alloc(26*1024*1024)})
-  await expect(page.getByRole('alert')).toContainText('25 MB')
+  const largePath=info.outputPath('too-large.pdf'),large=await open(largePath,'w');await large.truncate(101*1024*1024);await large.close()
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles(largePath)
+  await expect(page.getByRole('alert')).toContainText('100 MB')
   await textButton(page,'150,000').click()
-  await page.getByLabel('変更後のテキスト').fill('一行目\n二行目')
+  await page.getByLabel('変更後のテキスト').fill('一行目\t二行目')
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
-  await expect(page.getByRole('alert')).toContainText('改行')
+  await expect(page.getByRole('alert')).toContainText('制御文字')
   await ready(page,0)
   await page.getByLabel('変更後のテキスト').fill('🦄')
   await page.getByRole('button',{name:'変更を適用',exact:true}).click()
@@ -123,16 +123,18 @@ test('rejects invalid inputs and unsupported edits, preserving the current docum
   await expect(page.getByRole('alert')).toContainText('保存できない文字')
 })
 
-test('handles PDFs without text and blocks editing rotated pages',async({page})=>{
+test('handles image-only PDFs and edits rotated pages',async({page})=>{
   await page.goto('/')
   const blank=await PDFDocument.create();blank.addPage()
-  await page.locator('input[type=file]').setInputFiles({name:'no-text.pdf',mimeType:'application/pdf',buffer:Buffer.from(await blank.save())})
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'no-text.pdf',mimeType:'application/pdf',buffer:Buffer.from(await blank.save())})
   await expect(page.locator('.inline-note')).toContainText('文字情報がありません')
   const rotated=await PDFDocument.create(),p=rotated.addPage()
   p.drawText('Rotated text',{font:await rotated.embedFont(StandardFonts.Helvetica),x:50,y:500,size:14})
   p.setRotation(degrees(90))
-  await page.locator('input[type=file]').setInputFiles({name:'rotated.pdf',mimeType:'application/pdf',buffer:Buffer.from(await rotated.save())})
+  await page.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'rotated.pdf',mimeType:'application/pdf',buffer:Buffer.from(await rotated.save())})
   await textButton(page,'Rotated text').click()
-  await expect(page.locator('.restriction-note')).toContainText('回転')
-  await expect(page.getByLabel('変更後のテキスト')).toBeDisabled()
+  await expect(page.getByLabel('変更後のテキスト')).toBeEnabled()
+  await page.getByLabel('変更後のテキスト').fill('Edited rotation')
+  await page.getByRole('button',{name:'変更を適用',exact:true}).click()
+  await saveReady(page)
 })

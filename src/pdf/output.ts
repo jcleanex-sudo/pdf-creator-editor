@@ -1,22 +1,25 @@
-import { PDFDocument, PDFName, PDFString, StandardFonts, StandardFontEmbedder, concatTransformationMatrix, pushGraphicsState, popGraphicsState, rgb, type PDFFont } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFString, StandardFonts, StandardFontEmbedder, concatTransformationMatrix, pushGraphicsState, popGraphicsState, rgb, rectangle, clip, endPath, type PDFFont } from 'pdf-lib'
 import { SAMPLE_TEMPLATE, type CalculationRule } from './calculation'
 import { storeProject } from './project'
 import fontkit from '@pdf-lib/fontkit'
 import type { Edits, Replacement } from './types'
 import { decodeBase64, portableAssets } from './portable'
 import { glyphMetrics, registerGlyphMetrics } from './glyph-metrics'
+import { MAX_TEXT_LENGTH, MIN_FONT_SIZE, MAX_FONT_SIZE } from './limits'
+import { readHiddenText, storeHiddenText, describeHiddenText } from './hidden-text'
 
-const fontPromises = new Map<boolean, Promise<Uint8Array>>()
-export function loadJapaneseFont(bold = false) {
+const fontPromises = new Map<string, Promise<Uint8Array>>()
+export function loadJapaneseFont(bold = false, serif = false) {
   const embedded=portableAssets()
-  if(embedded) return Promise.resolve(decodeBase64(bold ? embedded.boldFont : embedded.font))
-  let promise = fontPromises.get(bold)
-  promise ??= fetch(`${import.meta.env.BASE_URL}fonts/NotoSansJP-${bold ? 'Bold' : 'Regular'}.ttf`)
+  if(embedded) return Promise.resolve(decodeBase64(serif ? bold ? embedded.boldSerifFont : embedded.serifFont : bold ? embedded.boldFont : embedded.font))
+  const key=`${serif?'serif':'sans'}-${bold}`
+  let promise = fontPromises.get(key)
+  promise ??= fetch(`${import.meta.env.BASE_URL}fonts/Noto${serif?'Serif':'Sans'}JP-${bold ? 'Bold' : 'Regular'}.ttf`)
     .then(async response => {
       if (!response.ok) throw new Error('日本語フォントを読み込めませんでした。ページを再読み込みしてください。')
       return new Uint8Array(await response.arrayBuffer())
-    }).catch(error => { fontPromises.delete(bold); throw error })
-  fontPromises.set(bold, promise)
+    }).catch(error => { fontPromises.delete(key); throw error })
+  fontPromises.set(key, promise)
   return promise
 }
 
@@ -26,6 +29,16 @@ function charset(font: PDFFont) {
   if (!values) { values = new Set(font.getCharacterSet()); charsets.set(font, values) }
   return values
 }
+function fontChoice(edit:Replacement) {
+  const appearance=edit.region.appearance
+  const bold=edit.bold??appearance?.bold??false,italic=appearance?.italic??false
+  let family=edit.family??'auto'
+  let standard=appearance?.standardFont
+  if(family==='auto'&&standard&&edit.bold!==undefined)family=/Times/.test(standard)?'serif':/Courier/.test(standard)?'mono':'sans'
+  if(family!=='auto')standard=family==='serif'?(bold?italic?StandardFonts.TimesRomanBoldItalic:StandardFonts.TimesRomanBold:italic?StandardFonts.TimesRomanItalic:StandardFonts.TimesRoman):family==='mono'?(bold?italic?StandardFonts.CourierBoldOblique:StandardFonts.CourierBold:italic?StandardFonts.CourierOblique:StandardFonts.Courier):(bold?italic?StandardFonts.HelveticaBoldOblique:StandardFonts.HelveticaBold:italic?StandardFonts.HelveticaOblique:StandardFonts.Helvetica)
+  const serif=family==='serif'||family==='auto'&&/mincho|ming|myungjo|serif|times/i.test(appearance?.fontName??'')
+  return {standard,bold,serif}
+}
 export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, subset = false) {
   pdf.registerFontkit(fontkit)
   const fonts = new Map<string, Promise<PDFFont>>()
@@ -34,30 +47,28 @@ export function createFontResolver(pdf: PDFDocument, regularBytes: Uint8Array, s
     return fonts.get(key)!
   }
   return async (edit: Replacement) => {
-    const standard = edit.region.appearance?.standardFont
+    const {standard,bold,serif}=fontChoice(edit)
     if (standard && Object.values(StandardFonts).includes(standard)) {
       const font = await embed(standard, () => pdf.embedFont(standard))
-      if ([...edit.text].every(character => charset(font).has(character.codePointAt(0)!))) return font
+      if ([...edit.text].filter(c=>c!=='\n'&&c!=='\r').every(character => charset(font).has(character.codePointAt(0)!))) return font
     }
-    return edit.region.appearance?.bold
-      ? embed('NotoSansJP-Bold', async () => {
-        const bytes = await loadJapaneseFont(true)
-        return registerGlyphMetrics(await pdf.embedFont(bytes, { subset }), bytes)
-      })
-      : embed('NotoSansJP-Regular', async () => registerGlyphMetrics(await pdf.embedFont(regularBytes, { subset }), regularBytes))
+    return embed(`Noto${serif?'Serif':'Sans'}JP-${bold?'Bold':'Regular'}`,async()=>{
+      const bytes=serif||bold?await loadJapaneseFont(bold,serif):regularBytes
+      return registerGlyphMetrics(await pdf.embedFont(bytes,{subset}),bytes)
+    })
   }
 }
 
 const latinEncoding = StandardFontEmbedder.for('Helvetica' as Parameters<typeof StandardFontEmbedder.for>[0]).encoding
 export function replacementFontLabel(edit: Replacement) {
-  const standard = edit.region.appearance?.standardFont
-  if (standard && [...edit.text].every(character => latinEncoding.canEncodeUnicodeCodePoint(character.codePointAt(0)!))) return standard
-  return `Noto Sans JP ${edit.region.appearance?.bold ? 'Bold' : 'Regular'}`
+  const {standard,bold,serif}=fontChoice(edit)
+  if (standard && [...edit.text].filter(c=>c!=='\n'&&c!=='\r').every(character => latinEncoding.canEncodeUnicodeCodePoint(character.codePointAt(0)!))) return standard
+  return `Noto ${serif?'Serif':'Sans'} JP ${bold?'Bold':'Regular'}`
 }
 
 export function replacementFontWarning(edit: Replacement) {
   const label = replacementFontLabel(edit), appearance = edit.region.appearance
-  const fallback = label.startsWith('Noto Sans JP')
+  const fallback = label.startsWith('Noto ')
   return [appearance?.warning,
     appearance?.standardFont && fallback ? '入力した文字を元の欧文書体で表示できないため、日本語書体を使用します。' : undefined,
     appearance?.italic && fallback ? '元の斜体の形は再現できません。' : undefined,
@@ -65,45 +76,53 @@ export function replacementFontWarning(edit: Replacement) {
 }
 
 export function fitText(font: PDFFont, edit: Replacement) {
-  const { text, region } = edit
-  if (text.length > 300) throw new Error('変更する文字列は300文字以内にしてください。')
-  if (/[\r\n\t\u0000-\u001f\u007f]/u.test(text)) throw new Error('改行・タブ・制御文字は使用できません。')
-  if (!Number.isFinite(edit.fontSize) || edit.fontSize < 4 || edit.fontSize > 144) throw new Error('文字サイズは4〜144 ptで指定してください。')
+  if([edit.offsetX,edit.offsetY].some(value=>value!==undefined&&(!Number.isFinite(value)||Math.abs(value)>100_000)))throw new Error('位置を正しく指定してください。')
+  const {text}=edit
+  const region=edit.region.layout?{...edit.region,...edit.region.layout}:edit.region
+  const lines=text.replace(/\r\n/g,'\n').split('\n')
+  if (text.length > MAX_TEXT_LENGTH) throw new Error('変更する文字列は10,000文字以内にしてください。')
+  if (/[\u0000-\u0009\u000b-\u000c\u000e-\u001f\u007f]/u.test(text)) throw new Error('タブ・制御文字は使用できません。')
+  if (!Number.isFinite(edit.fontSize) || edit.fontSize < MIN_FONT_SIZE || edit.fontSize > MAX_FONT_SIZE) throw new Error('文字サイズは1〜720 ptで指定してください。')
   if (!/^#[0-9a-f]{6}$/iu.test(edit.color)) throw new Error('文字色を正しく指定してください。')
-  const unsupported = [...new Set([...text].filter(c => !charset(font).has(c.codePointAt(0)!)))]
+  const unsupported = [...new Set([...text].filter(c => c!=='\n'&&c!=='\r'&&!charset(font).has(c.codePointAt(0)!)))]
   if (unsupported.length) throw new Error(`同梱フォントで保存できない文字があります：${unsupported.slice(0, 8).join(' ')}`)
   // Keep both the width and the glyph ascent/descent inside the original region.
-  const ink = glyphMetrics(font, text)
+  const measurements=lines.map(line=>glyphMetrics(font,line))
+  const hasMetrics=measurements.every(value=>!!value)
+  const ink=hasMetrics?{left:Math.min(...measurements.map(v=>v!.left)),right:Math.max(...measurements.map(v=>v!.right)),ascent:Math.max(...measurements.map(v=>v!.ascent)),descent:Math.max(...measurements.map(v=>v!.descent))+1.2*(lines.length-1)}:undefined
   const ascent = ink?.ascent ?? font.heightAtSize(1, { descender: false })
   const fullHeight = font.heightAtSize(1, { descender: true })
-  const descent = ink?.descent ?? Math.max(0, fullHeight - ascent)
+  const descent = ink?.descent ?? Math.max(0, fullHeight - ascent)+1.2*(lines.length-1)
   const topSpace = region.rect.y + region.rect.height - region.baseline - 0.35
   const bottomSpace = region.baseline - region.rect.y - 0.35
-  let size = region.tightBounds
+  const flexible=region.tightBounds||lines.length>1
+  let size = flexible
     ? Math.min(edit.fontSize, ascent + descent ? (region.rect.height - 0.7) / (ascent + descent) : edit.fontSize)
     : Math.min(edit.fontSize, ascent ? topSpace / ascent : edit.fontSize, descent ? bottomSpace / descent : edit.fontSize)
-  const naturalWidth = text ? font.widthOfTextAtSize(text, size) : 0
+  if(edit.autoFit===false)size=edit.fontSize
+  const measure=(size:number)=>Math.max(0,...lines.map(line=>font.widthOfTextAtSize(line,size)))
+  const naturalWidth = text ? measure(size) : 0
   // Preserve the original point size when possible. Modest horizontal fitting
   // avoids making a same-length numeric replacement noticeably shorter.
-  let scaleX = naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
-  if (naturalWidth * scaleX > region.width) size *= region.width / (naturalWidth * scaleX)
-  if (region.tightBounds) {
-    const inkWidth = ink ? (ink.right-ink.left) * size : (text ? font.widthOfTextAtSize(text, size) : 0)
+  let scaleX = edit.autoFit===false?1:naturalWidth > region.width ? Math.max(0.8, region.width / naturalWidth) : 1
+  if (edit.autoFit!==false && naturalWidth * scaleX > region.width) size *= region.width / (naturalWidth * scaleX)
+  if (edit.autoFit!==false && region.tightBounds) {
+    const inkWidth = ink ? (ink.right-ink.left) * size : (text ? measure(size) : 0)
     if (inkWidth > 0) scaleX = Math.min(scaleX, (region.rect.width-0.2) / inkWidth)
   }
-  if (!Number.isFinite(size) || size < 4) throw new Error('元の領域に収まりません。文字を短くするか、別の領域を選んでください。')
-  const fittedWidth = text ? font.widthOfTextAtSize(text, size) * scaleX : 0
+  if (!Number.isFinite(size) || size < MIN_FONT_SIZE) throw new Error('元の領域に収まりません。文字を短くするか、別の領域を選んでください。')
+  const fittedWidth = text ? measure(size) * scaleX : 0
   const offset = edit.align === 'right' ? region.width - fittedWidth : edit.align === 'center' ? (region.width - fittedWidth) / 2 : 0
   let x = region.x + offset
-  if (region.tightBounds) {
+  if (edit.autoFit!==false && region.tightBounds) {
     const left = ink ? ink.left * size * scaleX : 0
     const right = ink ? ink.right * size * scaleX : fittedWidth
     x = Math.max(region.rect.x + 0.1 - left, Math.min(x, region.rect.x + region.rect.width - 0.1 - right))
   }
   if (!Number.isFinite(scaleX) || scaleX <= 0) throw new Error('元の領域に収まりません。別の領域を選んでください。')
-  const baseline = region.tightBounds ? Math.max(region.rect.y + 0.35 + descent * size,
+  const baseline = edit.autoFit!==false && flexible ? Math.max(region.rect.y + 0.35 + descent * size,
     Math.min(region.baseline, region.rect.y + region.rect.height - 0.35 - ascent * size)) : region.baseline
-  return { size, x, baseline, width: fittedWidth, scaleX }
+  return { size, x:x+(edit.offsetX??0), baseline:baseline+(edit.offsetY??0), width: fittedWidth, scaleX, lines }
 }
 
 export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Uint8Array, calculation: CalculationRule | null = null): Promise<Uint8Array> {
@@ -122,14 +141,27 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
   for (const { edit, font, fit } of placements) {
     const page = pages[edit.region.pageIndex]
     if (!page) throw new Error('編集対象のページが見つかりません。')
-    page.drawRectangle({ ...edit.region.rect, color: rgb(1, 1, 1), borderWidth: 0 })
+    const background=edit.region.background
+    if(background&&'png' in background){
+      const image=await pdf.embedPng(background.png)
+      page.pushOperators(pushGraphicsState(),rectangle(edit.region.rect.x,edit.region.rect.y,edit.region.rect.width,edit.region.rect.height),clip(),endPath(),concatTransformationMatrix(...background.matrix))
+      page.drawImage(image,{x:0,y:0,width:1,height:1});page.pushOperators(popGraphicsState())
+    }else{
+      if(edit.region.backgroundKind==='patch')throw new Error('背景データがありません。変更をもう一度適用してください。')
+      const color=background&&'color' in background?background.color:'#ffffff'
+      const components=color.slice(1).match(/../g)!.map(part=>parseInt(part,16)/255)
+      page.drawRectangle({ ...edit.region.rect, color: rgb(components[0],components[1],components[2]), borderWidth: 0 })
+    }
     if (edit.text) {
       const parts = edit.color.slice(1).match(/../g)!.map(part => parseInt(part, 16) / 255)
-      page.pushOperators(pushGraphicsState(), concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, fit.baseline))
-      page.drawText(edit.text, { x: 0, y: 0, size: fit.size, font, color: rgb(parts[0], parts[1], parts[2]) })
+      page.pushOperators(pushGraphicsState())
+      if(edit.region.transform)page.pushOperators(concatTransformationMatrix(...edit.region.transform))
+      page.pushOperators(concatTransformationMatrix(fit.scaleX, 0, 0, 1, fit.x, fit.baseline))
+      page.drawText(fit.lines.join('\n'), { x: 0, y: 0, size: fit.size, lineHeight:fit.size*1.2, font, color: rgb(parts[0], parts[1], parts[2]) })
       page.pushOperators(popGraphicsState())
     }
   }
+  storeHiddenText(pdf,[...readHiddenText(pdf),...entries.map(edit=>describeHiddenText(edit.region))])
   storeProject(pdf, original, edits, calculation)
   return pdf.save()
 }
@@ -163,13 +195,13 @@ export async function makeSample(fontBytes: Uint8Array) {
   text('備考', 48, 276, 12)
   text('有効期限：発行日より30日間', 48, 246, 11)
   text('このサンプルの文字や数字をクリックして編集できます。', 48, 160, 10)
-  text('色の付いた表の見出しは、背景保護のため編集できません。', 48, 138, 10)
+  text('色の付いた表の見出しも、背景を保って編集できます。', 48, 138, 10)
   text('PDF Creator & Editor  /  Sample', 48, 50, 9)
   const second = pdf.addPage([595.28, 841.89])
   second.drawText('ご利用について', { x: 48, y: 740, size: 24, font })
   second.drawText('PDFの処理はすべて、お使いのブラウザ内で行います。', { x: 48, y: 678, size: 12, font })
   second.drawText('ファイルはサーバーへ送信されません。', { x: 48, y: 646, size: 12, font })
-  second.drawText('元の文字を白く覆い、新しい文字を重ねて保存します。', { x: 48, y: 580, size: 12, font })
+  second.drawText('元の背景を復元し、新しい文字を重ねて保存します。', { x: 48, y: 580, size: 12, font })
   second.drawText('機密情報の削除・墨消しには使用しないでください。', { x: 48, y: 548, size: 12, font })
   return pdf.save()
 }

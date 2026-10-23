@@ -16,9 +16,9 @@ describe('editable PDF project data', () => {
       { ...project, version: 2 },
       { ...project, edits: [edit, edit] },
       { ...project, edits: [{ ...edit, id: '__proto__' }] },
-      { ...project, edits: [{ ...edit, id: '200:0' }] },
-      { ...project, edits: [{ ...edit, text: 'a\nb' }] },
-      { ...project, edits: [{ ...edit, text: 'a'.repeat(301) }] },
+      { ...project, edits: [{ ...edit, id: '2000:0' }] },
+      { ...project, edits: [{ ...edit, text: 'a\tb' }] },
+      { ...project, edits: [{ ...edit, text: 'a'.repeat(10001) }] },
       { ...project, edits: [{ ...edit, fontSize: 0 }] },
       { ...project, edits: [{ ...edit, color: 'red' }] },
       { ...project, edits: [{ ...edit, align: 'invalid' }] },
@@ -26,7 +26,7 @@ describe('editable PDF project data', () => {
       { ...project, calculation: { ...rule, sources: ['1:1'] } },
       { ...project, calculation: { ...rule, taxPercent: 10.001 } },
     ]) expect(() => parseProject(encode(invalid))).toThrow()
-    expect(() => parseProject(new Uint8Array(4 * 1024 * 1024 + 1))).toThrow('大きすぎ')
+    expect(() => parseProject(new Uint8Array(16 * 1024 * 1024 + 1))).toThrow('大きすぎ')
   })
 
   it('round trips the exact original bytes and edit values through a normal saved PDF', async () => {

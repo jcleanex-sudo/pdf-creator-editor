@@ -2,19 +2,29 @@ import { test, expect } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { PDFDocument } from 'pdf-lib'
 
+// Keep bundled binary data out of automatic DOM snapshots. API tracing and
+// an explicit screenshot remain available.
+test.use({trace:{mode:'retain-on-failure',snapshots:false,screenshots:false}})
+
 test('self-contained HTML renders and edits PDFs offline without a server or form permissions',async({page,context},info)=>{
-  test.setTimeout(120_000)
+  test.setTimeout(180_000)
   const html=await readFile('release/PDF-Editor.html','utf8')
   const errors:string[]=[],network:string[]=[]
   page.on('pageerror',e=>errors.push(e.message))
   // Managed cloud Chromium disallows all file: navigation. Use an opaque-origin
-  // srcdoc sandbox, with networking disabled and without allow-same-origin or
+  // sandbox, with networking disabled and without allow-same-origin or
   // allow-forms, to verify the portable app's origin and resource independence.
   await page.route('http://pdf-editor.test/isolated',route=>route.fulfill({contentType:'text/html',body:'<html><body style="margin:0"><iframe id="app" sandbox="allow-scripts allow-downloads" style="width:100vw;height:100vh;border:0"></iframe></body></html>'}))
   await page.goto('http://pdf-editor.test/isolated')
   context.on('request',r=>{if(/^(https?|file):/.test(r.url()))network.push(r.url())})
   await context.setOffline(true)
-  const mount=()=>page.locator('#app').evaluate((frame,source)=>(frame as HTMLIFrameElement).srcdoc=source,html)
+  const mount=async()=>{
+    // Avoid a huge srcdoc attribute: resolving a frame would otherwise copy
+    // 50 MB of attributes on every Playwright action.
+    await page.evaluate(()=>{const frame=document.getElementById('app')!;frame.replaceWith(frame.cloneNode(false))})
+    const element=await page.locator('#app').elementHandle(),frame=await element!.contentFrame()
+    await frame!.setContent(html)
+  }
   await mount()
   const app=page.frameLocator('#app')
   await expect(app.getByRole('button',{name:'サンプルPDFを試す'})).toBeVisible()
@@ -29,6 +39,8 @@ test('self-contained HTML renders and edits PDFs offline without a server or for
   await expect(app.getByRole('button',{name:'PDFを保存',exact:true})).toBeEnabled()
   await text('株式会社サンプル 御中').click()
   await app.getByLabel('変更後のテキスト').fill('株式会社オフライン 御中')
+  await app.getByLabel('書体',{exact:true}).selectOption('serif')
+  await app.getByLabel('太字',{exact:true}).check()
   await app.getByRole('button',{name:'変更を適用',exact:true}).click()
   await expect(app.locator('.status-left')).toContainText('3箇所の変更')
   await expect(app.getByRole('button',{name:'PDFを保存',exact:true})).toBeEnabled()
@@ -41,7 +53,7 @@ test('self-contained HTML renders and edits PDFs offline without a server or for
   await page.screenshot({path:info.outputPath('offline-app.png'),fullPage:true})
   await mount()
   await expect(app.getByRole('button',{name:'サンプルPDFを試す'})).toBeVisible()
-  await app.locator('input[type=file]').setInputFiles({name:'offline-edited.pdf',mimeType:'application/pdf',buffer:bytes})
+  await app.getByLabel('PDFファイルを選択',{exact:true}).setInputFiles({name:'offline-edited.pdf',mimeType:'application/pdf',buffer:bytes})
   await expect(text('275,000')).toBeAttached()
   await expect(text('株式会社オフライン 御中')).toBeAttached()
   await expect(text('335,500')).toBeAttached()
@@ -52,6 +64,16 @@ test('self-contained HTML renders and edits PDFs offline without a server or for
   await app.getByRole('button',{name:'PDFを保存',exact:true}).click()
   await (await resumedEvent).saveAs(info.outputPath('offline-resumed.pdf'))
   await expect(text('341,000')).toBeAttached()
+  await app.getByRole('button',{name:'ページ追加',exact:true}).click()
+  await expect(app.getByRole('button',{name:'PDFを保存',exact:true})).toBeEnabled()
+  await expect(app.locator('.count-badge')).toHaveText('3')
+  await app.getByRole('button',{name:'文字追加',exact:true}).click()
+  await app.getByLabel('追加するテキスト').fill('通信なしの追加')
+  await app.getByRole('button',{name:'PDFに追加',exact:true}).click()
+  await expect(text('通信なしの追加')).toBeVisible()
+  await expect(app.getByRole('button',{name:'PDFを保存',exact:true})).toBeEnabled()
+  await app.getByRole('button',{name:'元に戻す',exact:true}).click()
+  await expect(text('通信なしの追加')).toHaveCount(0)
   expect(errors).toEqual([])
   expect(network).toEqual([])
 })
