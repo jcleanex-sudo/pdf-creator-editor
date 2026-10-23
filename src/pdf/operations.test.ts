@@ -1,8 +1,18 @@
 import {describe,it,expect} from 'vitest'
 import {PDFDocument} from 'pdf-lib'
 import {blankDocument,operateDocument} from './operations'
+import {readHiddenText,storeHiddenText} from './hidden-text'
 
 describe('document operations preserve original pages and indices',()=>{
+  it('duplicates an independent page and its hidden-text metadata while shifting following pages',async()=>{
+    const pdf=await PDFDocument.create();pdf.addPage([300,400]).drawText('COPY');pdf.addPage([500,600])
+    storeHiddenText(pdf,[{pageIndex:0,text:'HIDDEN',x:10,baseline:20,fontSize:12},{pageIndex:1,text:'LATER',x:10,baseline:20,fontSize:12}])
+    const result=await operateDocument(await pdf.save(),{type:'page-duplicate',index:0}),parsed=await PDFDocument.load(result.bytes)
+    expect(result.active).toBe(1);expect([...result.pageMap]).toEqual([[0,0],[1,2]])
+    expect(parsed.getPage(0).ref).not.toEqual(parsed.getPage(1).ref)
+    expect(parsed.getPages().map(page=>page.getSize().width)).toEqual([300,300,500])
+    expect(readHiddenText(parsed).map(value=>[value.text,value.pageIndex])).toEqual([['HIDDEN',0],['LATER',2],['HIDDEN',1]])
+  })
   it('adds, reorders, rotates and deletes pages without changing the source bytes',async()=>{
     const pdf=await PDFDocument.create();pdf.addPage([300,400]).drawText('FIRST');pdf.addPage([500,600]).drawText('SECOND')
     const original=await pdf.save(),copy=original.slice()

@@ -22,7 +22,7 @@ export function storeHiddenText(pdf:PDFDocument,values:HiddenText[]){
   if(values.length)pdf.catalog.set(key,pdf.context.register(pdf.context.stream(bytes)))
   else pdf.catalog.delete(key)
 }
-export function visibleTextRegions(regions:TextRegion[],hidden:HiddenText[]){
+export function visibleTextRegions<T extends HiddenText>(regions:T[],hidden:HiddenText[]):T[]{
   const counts=new Map<string,number>()
   for(const value of hidden){const id=fingerprint(value);counts.set(id,(counts.get(id)??0)+1)}
   return regions.filter(region=>{const id=fingerprint(region),remaining=counts.get(id)??0;if(!remaining)return true;counts.set(id,remaining-1);return false})

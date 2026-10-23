@@ -19,6 +19,9 @@ import { FontPicker } from './components/FontPicker'
 import { RegionPreview } from './components/RegionPreview'
 import { TypographyControls } from './components/TypographyControls'
 import { localNudge } from './pdf/coordinates'
+import { DocumentSearch, type BatchReport } from './components/DocumentSearch'
+import { replaceLiteral, type SearchHit, type SearchOptions } from './pdf/search'
+import { extractPages } from './pdf/page-ranges'
 
 type SourceDocument={bytes:Uint8Array;name:string}
 type Snapshot = { edits: Edits; calculation: CalculationRule | null; document:SourceDocument|null }
@@ -77,6 +80,11 @@ export default function App() {
   const [zoom, setZoom] = useState(1)
   const [dragging, setDragging] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  const [showSearch,setShowSearch]=useState(false)
+  const [showPages,setShowPages]=useState(false)
+  const [pageRange,setPageRange]=useState('')
+  const [moveTo,setMoveTo]=useState(1)
+  const [pagesError,setPagesError]=useState('')
   const [downloadRequested, setDownloadRequested] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const workspace = useRef<HTMLDivElement>(null)
@@ -258,6 +266,44 @@ export default function App() {
     if (rule) { await prepareEditBackground(session!, rule.target); fitText(await resolveFont(next[rule.target.id]), next[rule.target.id]) }
     return { next, resolveFont }
   }
+  async function jumpToHit(hit:SearchHit){
+    if(!session||busy)return
+    setLoading(true);setError('')
+    try{
+      const next=await loadPage(session,hit.pageIndex),region=next.regions.find(region=>region.id===hit.id)
+      if(!region)throw new Error('対象の文字が見つかりません。もう一度検索してください。')
+      setShowSearch(false);setSelected(region);setPageIndex(hit.pageIndex);setModel(next);setToolMode('select');setTextFilter('')
+      // Scroll after React has laid out the target page at its selected zoom.
+      setZoom(Math.max(zoom,2));requestAnimationFrame(()=>requestAnimationFrame(()=>changeZoom(Math.max(zoom,2),region)))
+    }catch(error){setError(messageOf(error))}finally{setLoading(false)}
+  }
+  async function batchReplace(hits:SearchHit[],replacement:string,options:SearchOptions):Promise<BatchReport>{
+    if(!session||busy)throw new Error('処理が終わってから置換してください。')
+    setValidating(true);setError('')
+    const report:BatchReport={changed:0,skipped:[]},proposed={...edits}
+    try{
+      const doc=await PDFDocument.create(),resolve=createFontResolver(doc,await loadJapaneseFont(),true,fonts)
+      for(const hit of hits){
+        try{
+          const page=await loadPage(session,hit.pageIndex),region=page.regions.find(region=>region.id===hit.id)
+          if(!region||(edits[hit.id]?.text??region.text)!==hit.text)throw new Error('文字が変わっています。検索し直してください。')
+          const reason=editRestriction(region,page)
+          if(reason)throw new Error(reason)
+          if(calculation?.target.id===region.id)throw new Error('自動計算の合計欄です。明細から更新します。')
+          const text=replaceLiteral(hit.text,replacement,options)
+          if(text===hit.text)continue
+          const previous=edits[hit.id]
+          const edit:Replacement=previous?{...previous,text}:{region,text,fontSize:region.fontSize,color:originalColor(region),align:originalAlign(region),autoFit:true,family:'auto',bold:region.appearance?.bold??false,customFontId:region.customFontId}
+          await prepareEditBackground(session,region);fitText(await resolve(edit),edit)
+          proposed[region.id]=edit;report.changed++
+        }catch(error){report.skipped.push({page:hit.pageIndex+1,text:hit.text,reason:messageOf(error)})}
+      }
+      // Recalculate/validate before dispatching once, so invalid totals never
+      // leave a half-applied batch and the entire batch is one undo operation.
+      if(report.changed){const{next}=await validateEdits(proposed,calculation);setSelected(null);dispatch({type:'set',edits:next});setNotice(`${report.changed}領域を置換しました。${report.skipped.length}領域は除外しました。`)}
+      return report
+    }finally{setValidating(false)}
+  }
   async function configureCalculation(rule: CalculationRule) {
     if (!model || busy || !canLeaveDraft()) return
     setValidating(true); setError(''); setNotice('')
@@ -350,10 +396,15 @@ export default function App() {
       const retained=Object.fromEntries(Object.entries(edits).filter(([id])=>!hiddenIds.has(id)))
       const rule=calculation&&[...calculation.sources,calculation.target].some(region=>discarded.some(value=>value.pageIndex===region.pageIndex&&value.text===region.text&&Math.abs(value.x-region.x)<0.05&&Math.abs(value.baseline-region.baseline)<0.05))?null:calculation
       const snapshot=await remapDocumentEdits(next,retained,rule,result.pageMap)
+      if(operation.type==='page-duplicate'){
+        const copied=Object.fromEntries(Object.entries(retained).filter(([,edit])=>edit.region.pageIndex===operation.index))
+        const clone=await remapDocumentEdits(next,copied,null,new Map([[operation.index,result.active]]))
+        Object.assign(snapshot.edits,clone.edits)
+      }
       setFonts({...fonts,...next.fonts})
       setPreview(null);setSelected(null);setModel(null);setSession(next);setPageIndex(result.active);setToolMode('select')
       dispatch({type:'set',...snapshot,document:{bytes:next.bytes,name:next.name}})
-      setNotice(result.notice??'変更を反映しました。「元に戻す」で取り消せます。')
+      setNotice(result.notice??(operation.type==='page-duplicate'&&calculation?.target.pageIndex===operation.index?'ページと適用済み編集を複製しました。複製先の合計は固定値です。必要に応じて自動計算を設定してください。':'変更を反映しました。「元に戻す」で取り消せます。'))
     }catch(error){if(next)void next.pdf.loadingTask.destroy();setError(messageOf(error))}
     finally{setLoading(false)}
   }
@@ -375,9 +426,18 @@ export default function App() {
     window.open(url,'_blank','noopener');setTimeout(()=>URL.revokeObjectURL(url),60_000)
     setNotice('印刷用PDFを開きました。開いた画面の印刷ボタンで印刷できます。')
   }
+  async function exportRange(){
+    if(!preview||busy)return
+    setLoading(true);setPagesError('')
+    try{
+      const bytes=await extractPages(preview.bytes,pageRange),url=URL.createObjectURL(new Blob([bytes.slice().buffer],{type:'application/pdf'})),anchor=document.createElement('a')
+      anchor.href=url;anchor.download=`${session!.name.replace(/\.pdf$/iu,'')}_pages.pdf`;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60_000)
+      setNotice('指定した順序のページを別のPDFとして保存しました。');setShowPages(false)
+    }catch(error){setPagesError(messageOf(error))}finally{setLoading(false)}
+  }
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if(passwordFile||showHelp)return
+      if(passwordFile||showHelp||showSearch||showPages)return
       const input = event.target instanceof HTMLElement && (['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName) || event.target.isContentEditable)
       const direction=({ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]} as Record<string,number[]>)[event.key]
       if(direction&&!input&&!event.ctrlKey&&!event.metaKey&&!event.altKey&&selected&&draft&&toolMode==='select'&&!busy&&!restriction){event.preventDefault();nudge(direction[0],direction[1],event.shiftKey?1:microStep);return}
@@ -424,13 +484,15 @@ export default function App() {
       <button type="button" className="tool-button" disabled={!session||busy} onClick={()=>void changeDocument({type:'page-add',index:pageIndex})}><Plus size={15}/>ページ追加</button>
       <button type="button" className="tool-button" disabled={!session||busy} onClick={()=>mergeInput.current?.click()}><Files size={15}/>PDF結合</button>
       <input ref={mergeInput} type="file" accept="application/pdf,.pdf" className="visually-hidden" aria-label="結合するPDFファイル" onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void merge(file)}}/>
+      <button type="button" className="tool-button" disabled={!session||busy} onClick={()=>{if(canLeaveDraft()){setSelected(null);setToolMode('select');setShowSearch(true)}}}><Type size={15}/>全文検索・置換</button>
+      <button type="button" className="tool-button" disabled={!preview||busy} onClick={()=>{if(dirty||toolMode!=='select'){setError('入力・追加中の変更を適用してからページ操作を開いてください。');return}setPageRange(String(pageIndex+1));setMoveTo(pageIndex+1);setPagesError('');setShowPages(true)}}><Files size={15}/>ページの抜き出し</button>
       <button type="button" className="tool-button" disabled={!preview||busy} onClick={()=>void visualCopy()}><Files size={15}/>画像化して編集</button><button type="button" className="tool-button" disabled={!preview||busy} onClick={printPdf}><Printer size={15}/>印刷</button>
     </div>
     {(error || notice) && <div className={`message ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}><span>{error || notice}{error&&recoveryFile&&<span className="recovery-action"><button type="button" disabled={busy} onClick={()=>void visualCopy(true)}>画像化したコピーで開く</button><small>文字情報・リンクは保持しません。範囲書き換えで編集できます。</small></span>}</span><button className="icon-button" aria-label="通知を閉じる" onClick={() => { setError(''); setNotice('') }}><X size={15}/></button></div>}
 
     <main className="editor-layout">
       <aside className="pages-panel"><div className="panel-title"><Layers size={16}/><h2>ページ</h2><span className="count-badge">{session?.pdf.numPages ?? 0}</span></div>
-        {session && preview ? <div className="page-list">{Array.from({length:session.pdf.numPages},(_,index)=><div className="page-entry" key={index}><Thumbnail pdf={preview.pdf} index={index} active={pageIndex===index} onClick={() => changePage(index)}/><div className="page-actions"><button type="button" className="icon-button" aria-label={`${index+1}ページを前へ`} disabled={busy||index===0} onClick={()=>void changeDocument({type:'page-move',index,to:index-1})}><ArrowUp size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを後へ`} disabled={busy||index===session.pdf.numPages-1} onClick={()=>void changeDocument({type:'page-move',index,to:index+1})}><ArrowDown size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを回転`} disabled={busy} onClick={()=>void changeDocument({type:'page-rotate',index})}><RotateCwSquare size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを削除`} disabled={busy||session.pdf.numPages===1} onClick={()=>void changeDocument({type:'page-delete',index})}><Trash2 size={12}/></button></div></div>)}</div> : <div className="empty-pages"><div className="mini-page"><span/><span/><span/><span/></div><p>PDFのページが<br/>ここに表示されます</p></div>}
+        {session && preview ? <div className="page-list">{Array.from({length:session.pdf.numPages},(_,index)=><div className="page-entry" key={index}><Thumbnail pdf={preview.pdf} index={index} active={pageIndex===index} onClick={() => changePage(index)}/><div className="page-actions"><button type="button" className="icon-button" aria-label={`${index+1}ページを前へ`} disabled={busy||index===0} onClick={()=>void changeDocument({type:'page-move',index,to:index-1})}><ArrowUp size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを後へ`} disabled={busy||index===session.pdf.numPages-1} onClick={()=>void changeDocument({type:'page-move',index,to:index+1})}><ArrowDown size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを回転`} disabled={busy} onClick={()=>void changeDocument({type:'page-rotate',index})}><RotateCwSquare size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを複製`} disabled={busy} onClick={()=>void changeDocument({type:'page-duplicate',index})}><Files size={12}/></button><button type="button" className="icon-button" aria-label={`${index+1}ページを削除`} disabled={busy||session.pdf.numPages===1} onClick={()=>void changeDocument({type:'page-delete',index})}><Trash2 size={12}/></button></div></div>)}</div> : <div className="empty-pages"><div className="mini-page"><span/><span/><span/><span/></div><p>PDFのページが<br/>ここに表示されます</p></div>}
         <div className="sidebar-bottom"><ShieldCheck size={16}/><span>あなたのファイルは<br/>あなたのデバイスに。</span></div>
       </aside>
 
@@ -468,7 +530,7 @@ export default function App() {
             {!restriction && <><p className="cover-notice">元の背景を復元して文字を変更します。画像のある箇所は編集範囲の背景を画像化します。元の文字はPDF内に残ります。</p><button type="button" onClick={()=>void applyEdit()} className="button primary apply-button" disabled={busy || !dirty}>{validating ? <LoaderCircle size={16} className="spin"/> : <Check size={16}/>}変更を適用</button><p className="save-hint">「PDFを保存」でも入力中の変更を反映できます。</p></>}
             <div className="field-group"><div><label className="field-label" htmlFor="font-size">文字サイズ</label><div className="number-input"><input id="font-size" type="number" min="1" max="720" step="0.1" value={Number(draft.fontSize.toFixed(2))} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,fontSize:Number(e.target.value)})}/><span>pt</span></div></div><div><label className="field-label" htmlFor="text-color">文字色</label><div className="color-input"><input id="text-color" type="color" value={draft.color} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,color:e.target.value})}/><span>{draft.color.toUpperCase()}</span></div></div></div>
             <label className="field-label" htmlFor="text-align">配置</label><select id="text-align" value={draft.align} disabled={!!restriction || busy} onChange={e=>setDraft({...draft,align:e.target.value as Draft['align']})}><option value="left">左揃え</option><option value="center">中央揃え</option><option value="right">右揃え</option></select>
-            <TypographyControls widthPercent={draft.widthPercent} lineHeight={draft.lineHeight} disabled={!!restriction||busy} onChange={value=>setDraft({...draft,...value})}/><div className="advanced-fields"><FontPicker id="font-family" label="書体" family={draft.family} customFontId={draft.customFontId} fonts={fonts} busy={!!restriction||busy} onChange={(family,customFontId)=>setDraft({...draft,family,customFontId})} onLoad={importFont}/><label className="option-check"><input type="checkbox" checked={draft.bold??false} disabled={!!restriction||busy||!!draft.customFontId} onChange={e=>setDraft({...draft,bold:e.target.checked})}/>太字</label><label className="option-check"><input type="checkbox" checked={draft.autoFit!==false} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,autoFit:e.target.checked})}/>元の領域に自動で収める</label><div className="field-group"><label>横へ移動（pt）<input aria-label="横へ移動（pt）" type="number" step="0.1" value={draft.offsetX??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetX:Number(e.target.value)})}/></label><label>上へ移動（pt）<input aria-label="上へ移動（pt）" type="number" step="0.1" value={draft.offsetY??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetY:Number(e.target.value)})}/></label></div><div className="nudge-controls"><label>移動の刻み（pt）<input type="number" aria-label="移動の刻み（pt）" min="0.01" max="10" step="0.1" value={microStep} disabled={!!restriction||busy} onChange={e=>setMicroStep(Number(e.target.value))}/></label><div className="nudge-buttons"><button type="button" aria-label="文字を左へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(-1,0)}><ArrowLeft size={14}/></button><button type="button" aria-label="文字を上へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,1)}><ArrowUp size={14}/></button><button type="button" aria-label="文字を下へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,-1)}><ArrowDown size={14}/></button><button type="button" aria-label="文字を右へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(1,0)}><ArrowRight size={14}/></button></div><small>矢印キーでも移動。Shift＋矢印は1pt。適用後に表示へ反映します。</small></div></div><div className="font-note"><span>書体を元に合わせて自動選択</span><strong>{replacementFontLabel({ ...draft, region: selected },fonts)}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
+            <TypographyControls widthPercent={draft.widthPercent} lineHeight={draft.lineHeight} disabled={!!restriction||busy} onChange={value=>setDraft({...draft,...value})}/><div className="advanced-fields"><FontPicker id="font-family" label="書体" family={draft.family} customFontId={draft.customFontId} fonts={fonts} busy={!!restriction||busy} onChange={(family,customFontId)=>setDraft({...draft,family,customFontId})} onLoad={importFont}/><label className="option-check"><input type="checkbox" checked={draft.bold??false} disabled={!!restriction||busy||!!draft.customFontId} onChange={e=>setDraft({...draft,bold:e.target.checked})}/>太字</label><label className="option-check"><input type="checkbox" checked={draft.autoFit!==false} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,autoFit:e.target.checked})}/>元の領域に自動で収める</label><div className="field-group"><label>横へ移動（pt）<input aria-label="横へ移動（pt）" type="number" step="0.1" value={draft.offsetX??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetX:Number(e.target.value)})}/></label><label>上へ移動（pt）<input aria-label="上へ移動（pt）" type="number" step="0.1" value={draft.offsetY??0} disabled={!!restriction||busy} onChange={e=>setDraft({...draft,offsetY:Number(e.target.value)})}/></label></div><div className="nudge-controls"><label>移動の刻み（pt）<input type="number" aria-label="移動の刻み（pt）" min="0.01" max="10" step="0.1" value={microStep} disabled={!!restriction||busy} onChange={e=>setMicroStep(Number(e.target.value))}/></label><div className="nudge-buttons"><button type="button" aria-label="文字を左へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(-1,0)}><ArrowLeft size={14}/></button><button type="button" aria-label="文字を上へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,1)}><ArrowUp size={14}/></button><button type="button" aria-label="文字を下へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(0,-1)}><ArrowDown size={14}/></button><button type="button" aria-label="文字を右へ微調整" disabled={!!restriction||busy} onClick={()=>nudge(1,0)}><ArrowRight size={14}/></button></div><small>矢印キーでも移動。Shift＋矢印は1pt。適用後に表示へ反映します。</small></div></div><div className="font-note"><span>{draft.customFontId?'読み込んだ書体を使用':draft.family&&draft.family!=='auto'?'選択した書体を使用':'書体を元に合わせて自動選択'}</span><strong>{replacementFontLabel({ ...draft, region: selected },fonts)}</strong><small>元の書体：{selected.appearance?.fontName ?? '不明'}{selected.appearance?.bold ? '（太字）' : ''}</small>{replacementFontWarning({ ...draft, region: selected }) && <small className="font-warning">{replacementFontWarning({ ...draft, region: selected })}</small>}</div>
             <div className="autofit-note"><Check size={15}/><div>{draft.autoFit===false?'自由な大きさで配置':'元の領域に合わせて自動調整'}<small>{draft.autoFit===false?'移動量とサイズを自由に指定できます。':'幅・高さに収まるよう文字を調整します。'}{actualSize && ` 適用サイズ ${actualSize.toFixed(1)} pt`}</small></div></div>
             {saved && !calculatedTarget && <button type="button" className="text-button reset-button" disabled={busy} onClick={()=>void resetSelectedEdit()}><RotateCcw size={14}/>この変更を取り消す</button>}
           </div>
@@ -477,9 +539,11 @@ export default function App() {
       </aside>
     </main>
 
-    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.3.0</span></footer>
+    <footer className="status-bar"><span className="status-left"><span className={`status-dot ${busy?'working':''}`}/>{busy ? '処理中…' : session ? previewError ? 'プレビューにエラーがあります' : `${formatSize(session.size)} · ${editCount}箇所の変更${dirty ? ' · 入力中の変更あり' : ''} · ${history.past.length}操作` : '準備完了'}</span><span className="status-center"><ShieldCheck size={12}/>ファイルはサーバーに送信されません</span><a href={getLicenseUrl()} target="_blank" rel="noreferrer">ライセンス</a><span>v0.4.0</span></footer>
     {dragging && <div className="drag-overlay"><Upload size={44}/><h2>PDFをドロップして開く</h2><p>ファイルはブラウザ内で処理されます</p></div>}
+    {showSearch&&session&&<DocumentSearch session={session} edits={edits} busy={busy} onClose={()=>setShowSearch(false)} onJump={jumpToHit} onReplace={batchReplace}/>}
+    {showPages&&session&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="pages-title"><div className="help-heading"><h2 id="pages-title">ページの抜き出し・移動</h2><button type="button" className="icon-button" aria-label="ページ操作を閉じる" disabled={busy} onClick={()=>setShowPages(false)}><X size={20}/></button></div><p>適用済みの編集を含めて、指定したページを別のPDFへ保存します。順序の変更や同じページの複数指定もできます。</p><label className="field-label" htmlFor="page-range">保存するページ（例：1,3-5）</label><input id="page-range" value={pageRange} disabled={busy} onChange={e=>setPageRange(e.target.value)}/><p>全{session.pdf.numPages}ページ。「3-1」は逆順、「1,1」は複製です。元のPDFのページは削除しません。しおり・フォーム操作や文書全体の設定は引き継ぎません。</p>{pagesError&&<p role="alert" className="batch-error">{pagesError}</p>}<button type="button" className="button primary" disabled={busy||!pageRange} onClick={()=>void exportRange()}>指定ページをPDFで保存</button><hr/><h3>現在の{pageIndex+1}ページを移動</h3><label className="field-label" htmlFor="page-move-to">移動先のページ番号</label><input id="page-move-to" type="number" min="1" max={session.pdf.numPages} step="1" value={moveTo} disabled={busy} onChange={e=>setMoveTo(Number(e.target.value))}/><button type="button" className="button secondary" disabled={busy||!Number.isInteger(moveTo)||moveTo<1||moveTo>session.pdf.numPages||moveTo===pageIndex+1} onClick={()=>{setShowPages(false);void changeDocument({type:'page-move',index:pageIndex,to:moveTo-1})}}>指定位置へ移動</button></section></div>}
     {passwordFile&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="password-title"><h2 id="password-title">パスワード付きPDFを開く</h2><p>パスワードを使って、このブラウザ内で画像の編集用コピーを作成します。コピーは文字の自動選択・検索やリンクを保持しません。範囲書き換えや文字追加で編集できます。パスワードやPDFは送信されません。</p><label className="field-label" htmlFor="pdf-password">PDFのパスワード</label><input id="pdf-password" type="password" autoFocus autoComplete="off" value={password} disabled={busy} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')void unlockFile()}}/>{passwordError&&<p role="alert">{passwordError}</p>}<button type="button" className="button primary" disabled={busy} onClick={()=>void unlockFile()}>画像化して開く</button><button type="button" className="text-button" disabled={busy} onClick={()=>{setPasswordFile(null);setPassword('');setPasswordError('')}}>キャンセル</button></section></div>}
-    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックするか一覧から選んで内容を変更します。「変更を適用」でプレビューを確認し、「PDFを保存」で別名ダウンロードできます。保存ボタンは入力中の変更も反映します。</p><h3>背景を保ちながら文字を編集</h3><p>元の背景を復元して文字を重ねます。単色の背景は色を引き継ぎ、画像や模様のある部分は編集する小さな範囲を画像として復元します。この部分は拡大時に画像の解像度の影響を受けます。回転ページ・回転文字にも対応します。重なる文字、縦書き、特殊なクリップや透明効果など、自動選択で編集できない箇所には「範囲書き換え」を使ってください。書体・色・サイズ・太字・位置を変更でき、改行も使えます。「元の領域に自動で収める」を外すと自由な大きさで配置できます。書体の完全な再現を保証するものではありません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。このバージョンで保存したPDFには、元のPDFと編集データを含めて保存し、このツールで再編集できます。元のデータも残るためファイルサイズは増えます。旧バージョンや別アプリで保存したPDFには、文字の重複により再編集できない領域があります。別アプリで加えた変更は、編集データからの再開時に引き継がれない場合があります。</p></div><h3>細かい文字・書式の調整</h3><p>このページの文字を検索して候補を絞り込めます。表示倍率は25〜800%、選択範囲は元の表示と適用後を4倍で比較できます。位置は0.1pt刻み（刻みを変更可能）で微調整でき、矢印キー・Shift＋矢印キーでも動かせます。矢印は画面の向き、数値欄は元の文字の方向を基準にします。字幅10〜500%、行間0.5〜5倍も指定できます。自動調整が有効な間は元の範囲へ収める処理が優先されます。</p><p>手元のTTF・OTFフォントを読み込み、変更・追加の両方に使えます。1ファイル20 MB、合計50 MB・16書体まで。PDFへの埋め込み・編集利用が許可されたフォントを選んでください。フォントファイルの太さ・斜体をそのまま使い、このツールで太字を合成しません。使用したフォントもPDFへ保存するため容量が増え、元データと同様に取り出せる場合があります。OSに入っているフォントを無断で収集せず、選択したファイルだけをブラウザ内で扱います。元と同じファイルでも、特殊な組版や文字間隔まで完全一致するとは限りません。</p><h3>新規作成・追加・ページ操作</h3><p>新規PDF、文字・画像・図形の追加、ページ追加・削除・並べ替え・回転、PDF結合に対応します。追加の場所はPDF上のドラッグか数値で指定します。「範囲書き換え」は指定した範囲の背景や画像も選んだ色で覆うため、保存前にプレビューで確認してください。スキャンPDFも手動で書き換えられます。OCRは使用しません。画像はPNG・JPEG・WebP・GIF・BMPに対応し、GIFは最初の画像を使います。印刷は別タブに開いたPDFの印刷ボタンから行えます。</p><h3>通常の編集が難しいPDF</h3><p>「画像化して編集」は現在の見た目を画像のコピーにし、「範囲書き換え」などで編集を続ける機能です。文字情報・検索・リンク等は保持せず、拡大品質は画像の解像度に依存します。切替は元に戻せます。読み込みに失敗しても、PDF表示が可能なら「画像化したコピーで開く」で編集できる場合があります。</p><h3>読み込みと履歴</h3><p>ブラウザのメモリを保護するため、入力100 MB・2,000ページ、置換1件10,000文字、文字サイズ1〜720 ptを上限とします。履歴はこのタブ内で最大40操作、文書の履歴は合計256 MB以内で保持します。ページ操作も元に戻す・やり直すの対象です。パスワード付きPDFは、パスワードを入力して画像化したコピーで編集できます。このコピーは文字情報・リンクなどを保持しません。電子署名は編集・保存すると無効になります。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定と計算結果をPDFの編集データにも保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP・Noto Serif JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
+    {showHelp && <div className="modal-backdrop" onClick={()=>setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={e=>e.stopPropagation()}><div className="help-heading"><span className="brand-mark"><FileText size={22}/></span><h2 id="help-title">使い方と編集の制限</h2><button type="button" className="icon-button" aria-label="説明を閉じる" autoFocus onClick={()=>setShowHelp(false)}><X size={20}/></button></div><p>PDFを開き、文字をクリックするか一覧から選んで内容を変更します。「変更を適用」でプレビューを確認し、「PDFを保存」で別名ダウンロードできます。保存ボタンは入力中の変更も反映します。</p><h3>背景を保ちながら文字を編集</h3><p>元の背景を復元して文字を重ねます。単色の背景は色を引き継ぎ、画像や模様のある部分は編集する小さな範囲を画像として復元します。この部分は拡大時に画像の解像度の影響を受けます。回転ページ・回転文字にも対応します。重なる文字、縦書き、特殊なクリップや透明効果など、自動選択で編集できない箇所には「範囲書き換え」を使ってください。書体・色・サイズ・太字・位置を変更でき、改行も使えます。「元の領域に自動で収める」を外すと自由な大きさで配置できます。書体の完全な再現を保証するものではありません。</p><div className="help-warning"><strong>墨消し機能ではありません</strong><p>元の文字はPDF内に残り、検索・コピーできる場合があります。機密情報の削除には使用しないでください。このバージョンで保存したPDFには、元のPDFと編集データを含めて保存し、このツールで再編集できます。元のデータも残るためファイルサイズは増えます。旧バージョンや別アプリで保存したPDFには、文字の重複により再編集できない領域があります。別アプリで加えた変更は、編集データからの再開時に引き継がれない場合があります。</p></div><h3>細かい文字・書式の調整</h3><p>このページの文字を検索して候補を絞り込めます。表示倍率は25〜800%、選択範囲は元の表示と適用後を4倍で比較できます。位置は0.1pt刻み（刻みを変更可能）で微調整でき、矢印キー・Shift＋矢印キーでも動かせます。矢印は画面の向き、数値欄は元の文字の方向を基準にします。字幅10〜500%、行間0.5〜5倍も指定できます。自動調整が有効な間は元の範囲へ収める処理が優先されます。</p><p>手元のTTF・OTFフォントを読み込み、変更・追加の両方に使えます。1ファイル20 MB、合計50 MB・16書体まで。PDFへの埋め込み・編集利用が許可されたフォントを選んでください。フォントファイルの太さ・斜体をそのまま使い、このツールで太字を合成しません。使用したフォントもPDFへ保存するため容量が増え、元データと同様に取り出せる場合があります。OSに入っているフォントを無断で収集せず、選択したファイルだけをブラウザ内で扱います。元と同じファイルでも、特殊な組版や文字間隔まで完全一致するとは限りません。</p><h3>全文検索・一括置換</h3><p>「全文検索・置換」で全ページの文字情報を検索し、結果から移動・対象選択・一括置換できます。大文字小文字の区別、領域全体の一致を指定できます。正規表現や画像の文字・領域をまたぐ検索には対応しません。各領域の元の色・書体・位置と、適用済みの書式設定を引き継ぎます。編集不可の領域と自動計算の合計欄は理由を表示して除外します。明細の置換で計算できなくなる場合は全体を適用しません。一度の置換をまとめて元に戻せます。</p><h3>新規作成・追加・ページ操作</h3><p>新規PDF、文字・画像・図形の追加、ページ追加・削除・複製・並べ替え・回転、PDF結合に対応します。「ページの抜き出し」で、適用済みの編集を含むページを指定順に別のPDFとして保存したり、現在のページを指定位置へ移動できます。例：1,3-5、逆順は3-1、複製は1,1。抜き出しではしおり・フォーム操作・文書全体の設定は引き継ぎません。ページを複製した合計欄は固定値となるため、必要に応じて自動計算を設定してください。追加の場所はPDF上のドラッグか数値で指定します。「範囲書き換え」は指定した範囲の背景や画像も選んだ色で覆うため、保存前にプレビューで確認してください。スキャンPDFも手動で書き換えられます。OCRは使用しません。画像はPNG・JPEG・WebP・GIF・BMPに対応し、GIFは最初の画像を使います。印刷は別タブに開いたPDFの印刷ボタンから行えます。</p><h3>通常の編集が難しいPDF</h3><p>「画像化して編集」は現在の見た目を画像のコピーにし、「範囲書き換え」などで編集を続ける機能です。文字情報・検索・リンク等は保持せず、拡大品質は画像の解像度に依存します。切替は元に戻せます。読み込みに失敗しても、PDF表示が可能なら「画像化したコピーで開く」で編集できる場合があります。</p><h3>読み込みと履歴</h3><p>ブラウザのメモリを保護するため、入力100 MB・2,000ページ、置換1件10,000文字、文字サイズ1〜720 ptを上限とします。履歴はこのタブ内で最大40操作、文書の履歴は合計256 MB以内で保持します。ページ操作も元に戻す・やり直すの対象です。パスワード付きPDFは、パスワードを入力して画像化したコピーで編集できます。このコピーは文字情報・リンクなどを保持しません。電子署名は編集・保存すると無効になります。</p><h3>合計の自動計算</h3><p>サンプル見積書は明細金額の合計に消費税10%を加え、1円未満を切り捨てます。ほかのPDFは「合計の自動計算」で同じページの明細と合計欄・税率を指定してください。数量から金額を算出する機能ではありません。設定と計算結果をPDFの編集データにも保存します。</p><h3>ローカル処理・オープンソース</h3><p>AI・外部APIは使いません。PDFの内容をサーバーに送信しません。PDF.js（Apache-2.0）、pdf-lib・fontkit・React（MIT）、Noto Sans JP・Noto Serif JP（SIL OFL 1.1）などを使用しています。</p><button className="button primary" onClick={()=>setShowHelp(false)}>編集画面に戻る</button></section></div>}
   </div>
 }

@@ -4,11 +4,13 @@ import type { DocumentSession, Rect, TextRegion, Replacement } from './types'
 import { MAX_FILE_SIZE, MAX_PAGES, MAX_TEXT_LENGTH } from './limits'
 import { readHiddenText, storeHiddenText, type HiddenText } from './hidden-text'
 import { readFontAssets, storeFontAssets, addFont, type FontAssets } from './custom-fonts'
+import { compactNewFonts, existingObjects } from './font-storage'
 
 export type Placement = { rect: Rect; matrix: [number,number,number,number,number,number]; coverRect: Rect }
 export type DocumentOperation =
   | { type:'page-add'; index:number }
   | { type:'page-delete'; index:number }
+  | { type:'page-duplicate'; index:number }
   | { type:'page-rotate'; index:number }
   | { type:'page-move'; index:number; to:number }
   | { type:'merge'; bytes:Uint8Array }
@@ -34,6 +36,7 @@ export async function placementAt(session:DocumentSession,index:number,rect:Rect
 
 export async function operateDocument(bytes:Uint8Array,operation:DocumentOperation,assets:FontAssets={}){
   const pdf=await PDFDocument.load(bytes),count=pdf.getPageCount()
+  const originalObjects=existingObjects(pdf)
   let hidden=readHiddenText(pdf)
   let fonts={...readFontAssets(pdf),...assets},notice:string|undefined
   // These edits become the new base document; they must not restore a stale
@@ -51,6 +54,13 @@ export async function operateDocument(bytes:Uint8Array,operation:DocumentOperati
     pdf.removePage(operation.index);pageMap.delete(operation.index)
     for(const[index]of pageMap)if(index>operation.index)pageMap.set(index,index-1)
     active=Math.min(operation.index,count-2)
+  }else if(operation.type==='page-duplicate'){
+    if(count>=MAX_PAGES)throw new Error('ページ数が多すぎます。')
+    const [copy]=await pdf.copyPages(pdf,[operation.index]),at=operation.index+1
+    pdf.insertPage(at,copy);active=at
+    for(const[index]of pageMap)if(index>=at)pageMap.set(index,index+1)
+    const copied=hidden.filter(value=>value.pageIndex===operation.index).map(value=>({...value,pageIndex:at}))
+    hidden=hidden.map(value=>({...value,pageIndex:pageMap.get(value.pageIndex)!})).concat(copied)
   }else if(operation.type==='page-move'){
     if(!Number.isInteger(operation.to)||operation.to<0||operation.to>=count)throw new Error('移動先のページが正しくありません。')
     const page=pdf.getPage(operation.index);pdf.removePage(operation.index);pdf.insertPage(operation.to,page);active=operation.to
@@ -100,9 +110,10 @@ export async function operateDocument(bytes:Uint8Array,operation:DocumentOperati
     }
     page.pushOperators(popGraphicsState())
   }
-  if(operation.type.startsWith('page-'))hidden=hidden.flatMap(value=>{const index=pageMap.get(value.pageIndex);return index===undefined?[]:[{...value,pageIndex:index}]})
+  if(operation.type.startsWith('page-')&&operation.type!=='page-duplicate')hidden=hidden.flatMap(value=>{const index=pageMap.get(value.pageIndex);return index===undefined?[]:[{...value,pageIndex:index}]})
   storeHiddenText(pdf,hidden)
   storeFontAssets(pdf,fonts)
+  await compactNewFonts(pdf,originalObjects)
   const result=await pdf.save()
   if(result.length>MAX_FILE_SIZE)throw new Error('編集後のPDFが100 MBを超えます。画像を小さくしてください。')
   return {bytes:result,pageMap,active,notice}

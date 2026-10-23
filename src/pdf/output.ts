@@ -9,6 +9,7 @@ import { MAX_TEXT_LENGTH, MIN_FONT_SIZE, MAX_FONT_SIZE } from './limits'
 import { readHiddenText, storeHiddenText, describeHiddenText } from './hidden-text'
 import { readFontAssets, storeFontAssets, inspectFont, type FontAssets } from './custom-fonts'
 import { MAX_FILE_SIZE } from './limits'
+import { compactNewFonts, existingObjects } from './font-storage'
 
 const fontPromises = new Map<string, Promise<Uint8Array>>()
 export function loadJapaneseFont(bold = false, serif = false) {
@@ -143,6 +144,7 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
   const entries = Object.values(edits)
   if (!entries.length) return original.slice()
   const pdf = await PDFDocument.load(original)
+  const originalObjects=existingObjects(pdf)
   // Full embedding avoids reproducible missing glyphs in fontkit's Japanese subsetting.
   // The extra file size is intentional until a verified subset pipeline is available.
   const baseFonts=readFontAssets(pdf),fonts={...baseFonts,...assets}
@@ -180,6 +182,7 @@ export async function writePdf(original: Uint8Array, edits: Edits, fontBytes: Ui
   const keep=new Set([...Object.keys(baseFonts),...entries.flatMap(edit=>edit.customFontId?[edit.customFontId]:[])])
   storeFontAssets(pdf,Object.fromEntries(Object.entries(fonts).filter(([id])=>keep.has(id))))
   storeProject(pdf, original, edits, calculation)
+  await compactNewFonts(pdf,originalObjects)
   const bytes=await pdf.save()
   if(bytes.length>MAX_FILE_SIZE)throw new Error('保存するPDFが100 MBを超えます。使用するフォントや画像を減らしてください。')
   return bytes
